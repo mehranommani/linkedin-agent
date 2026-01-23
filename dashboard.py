@@ -150,7 +150,7 @@ st.markdown("""
 # CONFIGURATION
 # ============================================================
 
-CSV_FILE = "/Users/mehran/Desktop/Linkedin Agent/linkedin_content_bank.csv"
+CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linkedin_content_bank.csv")
 
 # ============================================================
 # HELPER FUNCTIONS

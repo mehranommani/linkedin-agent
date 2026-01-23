@@ -30,7 +30,7 @@ from langchain_core.output_parsers import StrOutputParser
 # CONFIG
 # ============================================================
 
-CSV_FILE = "/Users/mehran/Desktop/Linkedin Agent/linkedin_content_bank.csv"
+CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linkedin_content_bank.csv")
 MODEL_NAME = "qwen2.5:14b"
 MAX_RETRIES = 2
 
