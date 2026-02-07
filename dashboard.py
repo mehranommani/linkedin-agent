@@ -1,16 +1,19 @@
 """
-LinkedIn Content Dashboard
-==========================
-A beautiful, modern dashboard to review, manage, and publish
-your AI-generated LinkedIn posts.
+LinkedIn Content Studio
+=======================
+Professional dashboard for AI-powered LinkedIn content generation.
 
 Run: streamlit run dashboard.py
 """
 
 import streamlit as st
 import pandas as pd
-import os
-from datetime import datetime, timedelta
+import csv
+import subprocess
+import threading
+import queue
+import time
+from pathlib import Path
 
 # ============================================================
 # PAGE CONFIG
@@ -24,157 +27,603 @@ st.set_page_config(
 )
 
 # ============================================================
-# CUSTOM CSS FOR MODERN UI
+# CONFIGURATION
+# ============================================================
+
+BASE_DIR = Path(__file__).parent
+CSV_FILE = BASE_DIR / "linkedin_content_bank.csv"
+AGENT_FILE = BASE_DIR / "agent.py"
+LOG_FILE = BASE_DIR / ".agent_output.log"
+
+# ============================================================
+# SOURCE CONFIGURATION
+# ============================================================
+
+SOURCE_CONFIG = {
+    "github": {"name": "GitHub", "icon": "🐙", "color": "#24292e", "gradient": "linear-gradient(135deg, #24292e 0%, #404448 100%)"},
+    "hackernews": {"name": "Hacker News", "icon": "🟠", "color": "#ff6600", "gradient": "linear-gradient(135deg, #ff6600 0%, #ff8533 100%)"},
+    "reddit": {"name": "Reddit", "icon": "🔴", "color": "#ff4500", "gradient": "linear-gradient(135deg, #ff4500 0%, #ff6b3d 100%)"},
+    "producthunt": {"name": "Product Hunt", "icon": "🚀", "color": "#da552f", "gradient": "linear-gradient(135deg, #da552f 0%, #ea7b56 100%)"},
+    "papers": {"name": "Papers", "icon": "📄", "color": "#21cbce", "gradient": "linear-gradient(135deg, #21cbce 0%, #4dd9db 100%)"},
+    "arxiv": {"name": "Arxiv", "icon": "🔬", "color": "#b31b1b", "gradient": "linear-gradient(135deg, #b31b1b 0%, #d44444 100%)"},
+    "devto": {"name": "Dev.to", "icon": "📝", "color": "#0a0a0a", "gradient": "linear-gradient(135deg, #0a0a0a 0%, #333333 100%)"},
+    "rss": {"name": "RSS Feeds", "icon": "📡", "color": "#ee802f", "gradient": "linear-gradient(135deg, #ee802f 0%, #f5a053 100%)"}
+}
+
+# ============================================================
+# PROFESSIONAL CSS DESIGN
 # ============================================================
 
 st.markdown("""
 <style>
-    /* Main container */
-    .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
+    /* ===== ROOT VARIABLES ===== */
+    :root {
+        --primary: #0a66c2;
+        --primary-dark: #004182;
+        --primary-light: #70b5f9;
+        --success: #057642;
+        --warning: #915907;
+        --danger: #cc1016;
+        --gray-50: #f8fafc;
+        --gray-100: #f1f5f9;
+        --gray-200: #e2e8f0;
+        --gray-300: #cbd5e1;
+        --gray-400: #94a3b8;
+        --gray-500: #64748b;
+        --gray-600: #475569;
+        --gray-700: #334155;
+        --gray-800: #1e293b;
+        --gray-900: #0f172a;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 16px;
+        --radius-xl: 24px;
+        --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+        --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+        --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
     }
 
-    /* Metric cards */
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
+    /* ===== GLOBAL STYLES ===== */
+    .main .block-container {
+        padding: 2rem 3rem;
+        max-width: 1400px;
+    }
+
+    /* Hide Streamlit branding */
+    #MainMenu, footer, header {visibility: hidden;}
+    .stDeployButton {display: none;}
+
+    /* ===== HEADER ===== */
+    .studio-header {
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+        padding: 2.5rem 3rem;
+        border-radius: var(--radius-xl);
+        margin-bottom: 2rem;
         color: white;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-xl);
     }
-    .metric-card h2 {
+    .studio-header h1 {
         margin: 0;
-        font-size: 2.5rem;
+        font-size: 2.25rem;
         font-weight: 700;
+        letter-spacing: -0.025em;
     }
-    .metric-card p {
+    .studio-header p {
         margin: 0.5rem 0 0 0;
         opacity: 0.9;
-        font-size: 0.9rem;
+        font-size: 1.1rem;
     }
 
-    /* Post card */
+    /* ===== METRIC CARDS ===== */
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: white;
+        border-radius: var(--radius-lg);
+        padding: 1.25rem 1.5rem;
+        box-shadow: var(--shadow-md);
+        border: 1px solid var(--gray-100);
+        transition: all 0.2s ease;
+    }
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+    }
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--gray-900);
+        line-height: 1.2;
+    }
+    .metric-label {
+        font-size: 0.875rem;
+        color: var(--gray-500);
+        margin-top: 0.25rem;
+    }
+    .metric-delta {
+        font-size: 0.75rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 999px;
+        display: inline-block;
+        margin-top: 0.5rem;
+    }
+    .delta-positive {
+        background: #dcfce7;
+        color: var(--success);
+    }
+    .delta-neutral {
+        background: var(--gray-100);
+        color: var(--gray-600);
+    }
+
+    /* ===== SOURCE STATS ===== */
+    .source-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.75rem;
+        margin: 1.5rem 0;
+    }
+    .source-stat-card {
+        background: white;
+        border-radius: var(--radius-md);
+        padding: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        box-shadow: var(--shadow-sm);
+        border: 1px solid var(--gray-100);
+        transition: all 0.2s ease;
+    }
+    .source-stat-card:hover {
+        border-color: var(--primary-light);
+    }
+    .source-icon {
+        font-size: 1.5rem;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+    }
+    .source-info .count {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: var(--gray-900);
+    }
+    .source-info .name {
+        font-size: 0.75rem;
+        color: var(--gray-500);
+    }
+
+    /* ===== POST CARDS ===== */
     .post-card {
         background: white;
-        border-radius: 12px;
+        border-radius: var(--radius-lg);
         padding: 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: var(--shadow-md);
+        border: 1px solid var(--gray-100);
+        transition: all 0.2s ease;
+    }
+    .post-card:hover {
+        box-shadow: var(--shadow-lg);
+    }
+    .post-card.used {
+        opacity: 0.65;
+        border-left: 4px solid var(--gray-400);
+    }
+    .post-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
         margin-bottom: 1rem;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-        border: 1px solid #e0e0e0;
+    }
+    .post-title {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--gray-900);
+        margin: 0;
+        line-height: 1.4;
+    }
+    .post-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-top: 0.5rem;
+        font-size: 0.8rem;
+        color: var(--gray-500);
     }
 
-    /* LinkedIn preview */
+    /* ===== BADGES ===== */
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.25rem 0.625rem;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.025em;
+    }
+    .badge-source {
+        color: white;
+    }
+    .badge-score-high {
+        background: #dcfce7;
+        color: var(--success);
+    }
+    .badge-score-medium {
+        background: #fef3c7;
+        color: var(--warning);
+    }
+    .badge-score-low {
+        background: #fee2e2;
+        color: var(--danger);
+    }
+    .badge-trending {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+    }
+    .badge-used {
+        background: var(--gray-200);
+        color: var(--gray-600);
+    }
+
+    /* ===== LINKEDIN PREVIEW ===== */
     .linkedin-preview {
-        background: #1a1a1a;
-        color: #e0e0e0;
+        background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+        color: #e8e8e8;
         padding: 1.5rem;
-        border-radius: 8px;
+        border-radius: var(--radius-md);
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         font-size: 14px;
-        line-height: 1.6;
+        line-height: 1.7;
         white-space: pre-wrap;
         max-height: 400px;
         overflow-y: auto;
+        border: 1px solid #2a2a4a;
     }
 
-    /* Score badge */
-    .score-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
+    /* ===== CHAR COUNT ===== */
+    .char-optimal { color: var(--success); font-weight: 600; }
+    .char-warning { color: var(--warning); font-weight: 600; }
+    .char-danger { color: var(--danger); font-weight: 600; }
+
+    /* ===== AGENT CONSOLE ===== */
+    .agent-console {
+        background: #0d1117;
+        color: #58a6ff;
+        padding: 1.25rem;
+        border-radius: var(--radius-md);
+        font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        font-size: 12px;
+        line-height: 1.6;
+        max-height: 450px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        border: 1px solid #30363d;
+    }
+    .agent-console .success { color: #3fb950; }
+    .agent-console .warning { color: #d29922; }
+    .agent-console .error { color: #f85149; }
+
+    /* ===== CONTROL PANEL ===== */
+    .control-panel {
+        background: white;
+        border-radius: var(--radius-lg);
+        padding: 1.5rem;
+        box-shadow: var(--shadow-md);
+        border: 1px solid var(--gray-100);
+    }
+    .control-section {
+        margin-bottom: 1.5rem;
+    }
+    .control-section:last-child {
+        margin-bottom: 0;
+    }
+    .control-title {
+        font-size: 0.875rem;
         font-weight: 600;
-    }
-    .score-high { background: #d4edda; color: #155724; }
-    .score-medium { background: #fff3cd; color: #856404; }
-    .score-low { background: #f8d7da; color: #721c24; }
-
-    /* Trending badge */
-    .trending-badge {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
-        padding: 0.2rem 0.6rem;
-        border-radius: 12px;
-        font-size: 0.75rem;
-        font-weight: 600;
+        color: var(--gray-700);
+        margin-bottom: 0.75rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
 
-    /* Copy button */
-    .copy-btn {
-        background: #0a66c2;
-        color: white;
-        border: none;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        cursor: pointer;
-        font-weight: 600;
+    /* ===== SOURCE SELECTOR ===== */
+    .source-selector {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.5rem;
     }
-
-    /* Character count */
-    .char-count {
+    .source-option {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.625rem 0.75rem;
+        background: var(--gray-50);
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--gray-200);
         font-size: 0.8rem;
-        color: #666;
+        transition: all 0.15s ease;
     }
-    .char-optimal { color: #28a745; }
-    .char-warning { color: #ffc107; }
-    .char-danger { color: #dc3545; }
-
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-
-    /* Sidebar styling */
-    .css-1d391kg {
-        padding-top: 1rem;
+    .source-option:hover {
+        border-color: var(--primary);
+        background: white;
+    }
+    .source-option.selected {
+        border-color: var(--primary);
+        background: #eff6ff;
     }
 
-    /* Used post styling */
-    .used-badge {
-        background: #6c757d;
+    /* ===== RUN BUTTON ===== */
+    .run-button {
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
         color: white;
-        padding: 0.2rem 0.6rem;
-        border-radius: 12px;
+        padding: 0.875rem 1.5rem;
+        border-radius: var(--radius-md);
+        font-weight: 600;
+        font-size: 1rem;
+        border: none;
+        width: 100%;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+    .run-button:hover {
+        transform: translateY(-1px);
+        box-shadow: var(--shadow-lg);
+    }
+    .run-button:disabled {
+        background: var(--gray-300);
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    /* ===== STATUS INDICATOR ===== */
+    .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-radius: var(--radius-md);
+        font-size: 0.875rem;
+        font-weight: 500;
+    }
+    .status-ready {
+        background: #dcfce7;
+        color: var(--success);
+    }
+    .status-running {
+        background: #dbeafe;
+        color: var(--primary);
+    }
+    .status-error {
+        background: #fee2e2;
+        color: var(--danger);
+    }
+    .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        animation: pulse 2s infinite;
+    }
+    .status-dot.ready { background: var(--success); }
+    .status-dot.running { background: var(--primary); }
+    .status-dot.error { background: var(--danger); }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+
+    /* ===== TABS ===== */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.5rem;
+        background: var(--gray-100);
+        padding: 0.5rem;
+        border-radius: var(--radius-lg);
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: var(--radius-md);
+        padding: 0.625rem 1.25rem;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background: white;
+        box-shadow: var(--shadow-sm);
+    }
+
+    /* ===== SIDEBAR ===== */
+    .css-1d391kg, [data-testid="stSidebar"] {
+        background: var(--gray-50);
+    }
+    .sidebar-section {
+        background: white;
+        border-radius: var(--radius-md);
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: var(--shadow-sm);
+    }
+    .sidebar-title {
         font-size: 0.75rem;
         font-weight: 600;
+        color: var(--gray-500);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.75rem;
     }
-    .used-post {
-        opacity: 0.6;
-        border-left: 4px solid #6c757d;
+
+    /* ===== EMPTY STATE ===== */
+    .empty-state {
+        text-align: center;
+        padding: 4rem 2rem;
+        background: var(--gray-50);
+        border-radius: var(--radius-xl);
+        border: 2px dashed var(--gray-200);
+    }
+    .empty-state h2 {
+        color: var(--gray-700);
+        margin-bottom: 0.5rem;
+    }
+    .empty-state p {
+        color: var(--gray-500);
+    }
+
+    /* ===== SCROLLBAR ===== */
+    ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+        background: var(--gray-100);
+        border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: var(--gray-300);
+        border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: var(--gray-400);
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# CONFIGURATION
+# AGENT RUNNER (DevOps Implementation)
 # ============================================================
 
-CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linkedin_content_bank.csv")
+class AgentRunner:
+    """Thread-safe agent runner with output streaming."""
+
+    def __init__(self):
+        self.output_queue = queue.Queue()
+        self.is_running = False
+        self.return_code = None
+        self.thread = None
+
+    def run_agent(self, max_posts: int, max_age_days: int, sources: list = None):
+        """Start agent in background thread."""
+        if self.is_running:
+            return False
+
+        self.is_running = True
+        self.return_code = None
+
+        # Clear queue
+        while not self.output_queue.empty():
+            try:
+                self.output_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self.thread = threading.Thread(
+            target=self._execute_agent,
+            args=(max_posts, max_age_days, sources),
+            daemon=True
+        )
+        self.thread.start()
+        return True
+
+    def _execute_agent(self, max_posts: int, max_age_days: int, sources: list = None):
+        """Execute agent and stream output to queue."""
+        try:
+            cmd = ["python3", str(AGENT_FILE), str(max_posts), str(max_age_days)]
+            if sources:
+                cmd.append(",".join(sources))
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                cwd=str(BASE_DIR)
+            )
+
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    self.output_queue.put(line)
+
+            process.wait()
+            self.return_code = process.returncode
+
+            if self.return_code == 0:
+                self.output_queue.put("\n✅ Agent completed successfully!\n")
+            else:
+                self.output_queue.put(f"\n❌ Agent exited with code {self.return_code}\n")
+
+        except Exception as e:
+            self.output_queue.put(f"\n❌ Error: {str(e)}\n")
+            self.return_code = -1
+        finally:
+            self.is_running = False
+
+    def get_output(self) -> list:
+        """Get all available output lines."""
+        lines = []
+        while not self.output_queue.empty():
+            try:
+                lines.append(self.output_queue.get_nowait())
+            except queue.Empty:
+                break
+        return lines
+
+
+# Initialize agent runner in session state
+if 'agent_runner' not in st.session_state:
+    st.session_state.agent_runner = AgentRunner()
+if 'agent_output_lines' not in st.session_state:
+    st.session_state.agent_output_lines = []
 
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 
-def load_data_uncached():
-    """Load data without caching (for updates)."""
-    if not os.path.exists(CSV_FILE):
+def get_source_badge_html(source: str) -> str:
+    """Generate source badge HTML."""
+    config = SOURCE_CONFIG.get(source, {"name": source.title(), "icon": "📌", "gradient": "linear-gradient(135deg, #666 0%, #888 100%)"})
+    return f'<span class="badge badge-source" style="background: {config["gradient"]}">{config["icon"]} {config["name"]}</span>'
+
+
+def get_score_badge_html(score: float) -> str:
+    """Generate score badge HTML."""
+    if score >= 8:
+        return f'<span class="badge badge-score-high">★ {score:.1f}</span>'
+    elif score >= 5:
+        return f'<span class="badge badge-score-medium">★ {score:.1f}</span>'
+    return f'<span class="badge badge-score-low">★ {score:.1f}</span>'
+
+
+def load_data():
+    """Load and prepare data."""
+    if not CSV_FILE.exists():
         return pd.DataFrame()
 
     try:
-        df = pd.read_csv(CSV_FILE)
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
+        df = pd.read_csv(CSV_FILE, on_bad_lines='skip', quoting=csv.QUOTE_ALL)
 
-        # Calculate character count
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+
         if 'linkedin_post' in df.columns:
             df['char_count'] = df['linkedin_post'].str.len()
 
-        # Add 'used' column if it doesn't exist
         if 'used' not in df.columns:
             df['used'] = False
-
-        # Ensure 'used' is boolean
         df['used'] = df['used'].fillna(False).astype(bool)
 
         return df.sort_values(by='date', ascending=False).reset_index(drop=True)
@@ -183,278 +632,337 @@ def load_data_uncached():
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=60)
-def load_data():
-    """Load and prepare the data (cached)."""
-    return load_data_uncached()
-
-
 def mark_post_used(original_link: str, used: bool = True):
-    """Mark a post as used/unused and save to CSV."""
+    """Mark post as used/unused."""
     try:
-        df = pd.read_csv(CSV_FILE)
-
-        # Add 'used' column if it doesn't exist
+        df = pd.read_csv(CSV_FILE, on_bad_lines='skip', quoting=csv.QUOTE_ALL)
         if 'used' not in df.columns:
             df['used'] = False
-
-        # Update the specific post
         df.loc[df['original_link'] == original_link, 'used'] = used
-
-        # Save back to CSV
-        df.to_csv(CSV_FILE, index=False)
-
-        # Clear cache to reload data
-        st.cache_data.clear()
+        df.to_csv(CSV_FILE, index=False, quoting=csv.QUOTE_ALL)
         return True
     except Exception as e:
-        st.error(f"Error updating post: {e}")
+        st.error(f"Error: {e}")
         return False
 
 
 def get_char_status(count: int) -> tuple:
-    """Get character count status and color."""
+    """Get character count status."""
     if 1400 <= count <= 2100:
         return "Optimal", "char-optimal"
     elif 1000 <= count < 1400 or 2100 < count <= 2500:
-        return "Okay", "char-warning"
-    else:
-        return "Review", "char-danger"
+        return "Warning", "char-warning"
+    return "Review", "char-danger"
 
 
-def get_score_class(score: float) -> str:
-    """Get score badge class."""
-    if score >= 7.0:
-        return "score-high"
-    elif score >= 5.0:
-        return "score-medium"
-    return "score-low"
+# ============================================================
+# UI COMPONENTS
+# ============================================================
+
+def render_header():
+    """Render studio header."""
+    st.markdown("""
+    <div class="studio-header">
+        <h1>💼 LinkedIn Content Studio</h1>
+        <p>AI-powered content generation and management platform</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_metrics(df: pd.DataFrame):
-    """Render the metrics row."""
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    """Render metrics dashboard."""
+    total = len(df)
+    unused = len(df[~df['used']]) if 'used' in df.columns else total
+    avg_score = df['final_score'].mean() if 'final_score' in df.columns else 0
+    optimal = len(df[(df['char_count'] >= 1400) & (df['char_count'] <= 2100)]) if 'char_count' in df.columns else 0
+    trending = len(df[df['trending_boost'] > 0]) if 'trending_boost' in df.columns else 0
 
-    with col1:
-        st.metric(
-            label="📝 Total Posts",
-            value=len(df),
-            delta=f"+{len(df[df['date'] == df['date'].max()])}" if len(df) > 0 else None
-        )
+    st.markdown(f"""
+    <div class="metric-grid">
+        <div class="metric-card">
+            <div class="metric-value">{total}</div>
+            <div class="metric-label">Total Posts</div>
+            <span class="metric-delta delta-neutral">All time</span>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{unused}</div>
+            <div class="metric-label">Ready to Use</div>
+            <span class="metric-delta delta-positive">{unused/total*100:.0f}% available</span>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{avg_score:.1f}</div>
+            <div class="metric-label">Avg Score</div>
+            <span class="metric-delta {'delta-positive' if avg_score >= 7 else 'delta-neutral'}">{'Good' if avg_score >= 7 else 'Fair'}</span>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{optimal}</div>
+            <div class="metric-label">Optimal Length</div>
+            <span class="metric-delta delta-positive">{optimal/total*100:.0f}%</span>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{trending}</div>
+            <div class="metric-label">Trending</div>
+            <span class="metric-delta delta-positive">🔥 Hot topics</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with col2:
-        # Unused posts count
-        if 'used' in df.columns:
-            unused = len(df[~df['used']])
-            st.metric(
-                label="📋 Unused",
-                value=unused,
-                delta=f"{unused/len(df)*100:.0f}% available" if len(df) > 0 else None
-            )
-        else:
-            st.metric(label="📋 Unused", value=len(df))
 
-    with col3:
-        if 'final_score' in df.columns:
-            avg_score = df['final_score'].mean()
-            st.metric(
-                label="⭐ Avg Score",
-                value=f"{avg_score:.1f}",
-                delta="Good" if avg_score >= 7 else "Improve"
-            )
-        else:
-            st.metric(label="⭐ Avg Score", value="N/A")
+def render_source_stats(df: pd.DataFrame):
+    """Render source distribution."""
+    if 'source' not in df.columns or len(df) == 0:
+        return
 
-    with col4:
-        if 'trending_boost' in df.columns:
-            trending = len(df[df['trending_boost'] > 0])
-            st.metric(
-                label="🔥 Trending",
-                value=trending,
-                delta=f"{trending/len(df)*100:.0f}%" if len(df) > 0 else None
-            )
-        else:
-            st.metric(label="🔥 Trending", value="N/A")
+    counts = df['source'].value_counts()
 
-    with col5:
-        if 'char_count' in df.columns:
-            optimal = len(df[(df['char_count'] >= 1400) & (df['char_count'] <= 2100)])
-            st.metric(
-                label="📏 Optimal Length",
-                value=f"{optimal}/{len(df)}",
-                delta=f"{optimal/len(df)*100:.0f}%" if len(df) > 0 else None
-            )
-        else:
-            st.metric(label="📏 Optimal Length", value="N/A")
+    # Use st.columns for proper Streamlit rendering
+    cols = st.columns(min(len(counts), 4))
 
-    with col6:
-        if len(df) > 0:
-            latest = df['date'].max().strftime('%b %d')
-            st.metric(label="📅 Latest", value=latest)
-        else:
-            st.metric(label="📅 Latest", value="N/A")
+    for idx, (source, count) in enumerate(counts.items()):
+        config = SOURCE_CONFIG.get(source, {"name": source.title(), "icon": "📌", "color": "#666"})
+        with cols[idx % 4]:
+            st.markdown(f"""
+                <div style="background: white; border-radius: 10px; padding: 1rem; margin: 0.25rem 0;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid {config['color']};">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: #1e293b;">{config['icon']} {count}</div>
+                    <div style="font-size: 0.8rem; color: #64748b;">{config['name']}</div>
+                </div>
+            """, unsafe_allow_html=True)
 
 
 def render_post_card(row: pd.Series, index: int):
-    """Render a single post card."""
+    """Render a post card."""
     is_used = row.get('used', False)
+    source = row.get('source', 'unknown')
 
     with st.container():
-        # Header row with title, badges, and used toggle
-        header_col1, header_col2, header_col3 = st.columns([3, 1, 0.5])
+        # Build badges
+        badges = get_source_badge_html(source)
+        if is_used:
+            badges += ' <span class="badge badge-used">✓ Used</span>'
+        if 'final_score' in row and pd.notna(row.get('final_score')):
+            badges += ' ' + get_score_badge_html(row['final_score'])
+        if row.get('trending_boost', 0) > 0:
+            badges += ' <span class="badge badge-trending">🔥 Trending</span>'
 
-        with header_col1:
-            title_prefix = "~~" if is_used else ""
-            title_suffix = "~~" if is_used else ""
-            st.markdown(f"### {title_prefix}{row['title'][:80]}{'...' if len(row['title']) > 80 else ''}{title_suffix}")
-
-        with header_col2:
-            badges = ""
-            if is_used:
-                badges += '<span class="used-badge">✓ USED</span> '
-            if 'final_score' in row and pd.notna(row.get('final_score')):
-                score_class = get_score_class(row['final_score'])
-                badges += f'<span class="score-badge {score_class}">Score: {row["final_score"]:.1f}</span> '
-            if 'trending_boost' in row and row.get('trending_boost', 0) > 0:
-                badges += '<span class="trending-badge">🔥 TRENDING</span>'
-            st.markdown(badges, unsafe_allow_html=True)
-
-        with header_col3:
-            # Toggle used status button
-            btn_label = "↩️" if is_used else "✓"
-            btn_help = "Mark as unused" if is_used else "Mark as used"
-            if st.button(btn_label, key=f"toggle_used_{index}", help=btn_help):
-                mark_post_used(row['original_link'], not is_used)
-                st.rerun()
-
-        # Meta info
-        date_str = row['date'].strftime('%B %d, %Y') if pd.notna(row['date']) else 'Unknown'
-        st.caption(f"📅 {date_str} • 🔗 [Original Source]({row['original_link']})")
-
-        # Main content area
-        col1, col2 = st.columns([1, 2])
-
-        # Left: Image and stats
+        # Header
+        col1, col2 = st.columns([5, 1])
         with col1:
-            # Image
-            img_url = row.get('image_url', '')
-            if pd.notna(img_url) and str(img_url).startswith('http'):
-                st.image(img_url, use_container_width=True)
-            else:
-                st.info("📷 No image available")
+            title = row['title'][:85] + '...' if len(row['title']) > 85 else row['title']
+            date_str = row['date'].strftime('%b %d, %Y') if pd.notna(row['date']) else 'Unknown'
 
-            # Stats
-            st.markdown("---")
-            st.markdown("**📊 Post Analytics**")
-
-            char_count = len(str(row.get('linkedin_post', '')))
-            status, status_class = get_char_status(char_count)
             st.markdown(f"""
-            <div style="font-size: 0.9rem;">
-                <p><strong>Characters:</strong> <span class="{status_class}">{char_count:,} ({status})</span></p>
+            <div style="margin-bottom: 0.5rem;">{badges}</div>
+            <h4 style="margin: 0; font-size: 1rem; color: {'#64748b' if is_used else '#1e293b'};">
+                {'~~' + title + '~~' if is_used else title}
+            </h4>
+            <div class="post-meta">
+                <span>📅 {date_str}</span>
+                <span>•</span>
+                <a href="{row['original_link']}" target="_blank" style="color: #0a66c2; text-decoration: none;">View Source ↗</a>
             </div>
             """, unsafe_allow_html=True)
 
-            if 'relevance_score' in row and pd.notna(row.get('relevance_score')):
-                st.markdown(f"**Relevance:** {row['relevance_score']:.1f}/10")
-            if 'quality_score' in row and pd.notna(row.get('quality_score')):
-                st.markdown(f"**Quality:** {row['quality_score']:.1f}/10")
-
-        # Right: Post content
         with col2:
+            btn_label = "↩️ Restore" if is_used else "✓ Mark Used"
+            if st.button(btn_label, key=f"toggle_{index}", use_container_width=True):
+                mark_post_used(row['original_link'], not is_used)
+                st.rerun()
+
+        # Content tabs
+        tab1, tab2, tab3 = st.tabs(["📋 Copy", "👁️ Preview", "📊 Stats"])
+
+        with tab1:
             post_text = str(row.get('linkedin_post', ''))
 
-            # Tabs for different views
-            tab1, tab2, tab3 = st.tabs(["📋 Copy Text", "👀 LinkedIn Preview", "✏️ Edit"])
+            # Copy button with JavaScript
+            copy_btn_id = f"copy_btn_{index}"
+            textarea_id = f"textarea_{index}"
 
-            with tab1:
-                st.text_area(
-                    "Click to select all, then copy (Cmd+C / Ctrl+C)",
-                    value=post_text,
-                    height=350,
-                    key=f"copy_{index}",
-                    label_visibility="collapsed"
+            st.markdown(f"""
+            <style>
+                .copy-btn {{
+                    background: linear-gradient(135deg, #0a66c2 0%, #004182 100%);
+                    color: white;
+                    border: none;
+                    padding: 0.5rem 1rem;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-weight: 600;
+                    font-size: 0.875rem;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                    transition: all 0.2s ease;
+                    margin-bottom: 0.75rem;
+                }}
+                .copy-btn:hover {{
+                    transform: translateY(-1px);
+                    box-shadow: 0 4px 12px rgba(10, 102, 194, 0.3);
+                }}
+                .copy-btn.copied {{
+                    background: linear-gradient(135deg, #057642 0%, #03582f 100%);
+                }}
+            </style>
+            <button class="copy-btn" id="{copy_btn_id}" onclick="
+                const text = document.getElementById('{textarea_id}').value;
+                navigator.clipboard.writeText(text).then(() => {{
+                    const btn = document.getElementById('{copy_btn_id}');
+                    btn.innerHTML = '✅ Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => {{
+                        btn.innerHTML = '📋 Copy to Clipboard';
+                        btn.classList.remove('copied');
+                    }}, 2000);
+                }});
+            ">📋 Copy to Clipboard</button>
+            """, unsafe_allow_html=True)
+
+            st.text_area("", value=post_text, height=300, key=f"copy_{index}", label_visibility="collapsed")
+
+            # Hidden textarea for JS copy (since Streamlit text_area has complex DOM)
+            st.markdown(f'<textarea id="{textarea_id}" style="position: absolute; left: -9999px;">{post_text}</textarea>', unsafe_allow_html=True)
+
+            char_count = len(post_text)
+            status, status_class = get_char_status(char_count)
+            st.caption(f"Characters: **{char_count:,}** • Status: <span class='{status_class}'>{status}</span>", unsafe_allow_html=True)
+
+        with tab2:
+            st.markdown(f"""
+            <div class="linkedin-preview">{row.get('linkedin_post', '')}</div>
+            """, unsafe_allow_html=True)
+
+        with tab3:
+            stat_cols = st.columns(3)
+            with stat_cols[0]:
+                st.metric("Characters", f"{len(str(row.get('linkedin_post', ''))):,}")
+            with stat_cols[1]:
+                st.metric("Relevance", f"{row.get('relevance_score', 0):.1f}/10")
+            with stat_cols[2]:
+                st.metric("Quality", f"{row.get('quality_score', 0):.1f}/10")
+
+        st.divider()
+
+
+def render_agent_control():
+    """Render agent control panel."""
+    runner = st.session_state.agent_runner
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.markdown("#### ⚙️ Configuration")
+
+        max_posts = st.slider("Posts to generate", 1, 30, 10, help="Number of LinkedIn posts to create")
+        max_age_days = st.slider("Content age (days)", 1, 30, 7, help="Fetch content from last N days")
+
+        st.markdown("#### 📡 Sources")
+
+        # Source selection as checkboxes
+        selected_sources = {}
+        source_cols = st.columns(2)
+        for idx, (key, config) in enumerate(SOURCE_CONFIG.items()):
+            with source_cols[idx % 2]:
+                selected_sources[key] = st.checkbox(
+                    f"{config['icon']} {config['name']}",
+                    value=True,
+                    key=f"src_{key}"
                 )
-                st.caption("💡 Tip: Click inside the text area and use Cmd+A (Mac) or Ctrl+A (Windows) to select all")
 
-            with tab2:
-                st.markdown(f"""
-                <div class="linkedin-preview">
-                    {post_text}
-                </div>
-                """, unsafe_allow_html=True)
+    with col2:
+        st.markdown("#### 🚀 Execute Agent")
 
-            with tab3:
-                edited = st.text_area(
-                    "Edit post content",
-                    value=post_text,
-                    height=350,
-                    key=f"edit_{index}",
-                    label_visibility="collapsed"
-                )
-                if edited != post_text:
-                    st.warning("⚠️ Changes are preview only. Manual save not yet implemented.")
-                    new_count = len(edited)
-                    new_status, new_class = get_char_status(new_count)
-                    st.markdown(f"New character count: **{new_count}** ({new_status})")
+        enabled_count = sum(selected_sources.values())
+
+        # Status indicator
+        if runner.is_running:
+            st.markdown("""
+            <div class="status-indicator status-running">
+                <span class="status-dot running"></span>
+                Agent is running...
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="status-indicator status-ready">
+                <span class="status-dot ready"></span>
+                Ready • {enabled_count} sources • {max_posts} posts • {max_age_days} days
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Run button
+        if st.button(
+            "🚀 Run Agent" if not runner.is_running else "⏳ Running...",
+            type="primary",
+            disabled=runner.is_running or enabled_count == 0,
+            use_container_width=True
+        ):
+            # Get list of enabled sources
+            enabled_sources = [key for key, enabled in selected_sources.items() if enabled]
+            st.session_state.agent_output_lines = []
+            runner.run_agent(max_posts, max_age_days, enabled_sources)
+            st.rerun()
+
+        # Console output
+        st.markdown("#### 📟 Console Output")
+
+        # Get new output
+        if runner.is_running or runner.return_code is not None:
+            new_lines = runner.get_output()
+            st.session_state.agent_output_lines.extend(new_lines)
+
+        # Display output
+        output_text = ''.join(st.session_state.agent_output_lines[-100:])  # Last 100 lines
+        if output_text:
+            st.markdown(f'<div class="agent-console">{output_text}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="agent-console">Waiting for output...</div>', unsafe_allow_html=True)
+
+        # Auto-refresh while running
+        if runner.is_running:
+            time.sleep(0.5)
+            st.rerun()
+
+        # Show completion message
+        if runner.return_code is not None and not runner.is_running:
+            if runner.return_code == 0:
+                st.success("✅ Agent completed! Refresh the Posts tab to see new content.")
+            else:
+                st.error(f"Agent failed with code {runner.return_code}")
 
         st.markdown("---")
+        st.markdown("**Manual command:**")
+        enabled_sources_list = [key for key, enabled in selected_sources.items() if enabled]
+        sources_arg = ",".join(enabled_sources_list) if enabled_sources_list else "all"
+        st.code(f"python3 agent.py {max_posts} {max_age_days} {sources_arg}", language="bash")
 
 
 def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
-    """Render sidebar filters and return filtered dataframe."""
-
+    """Render sidebar filters."""
     st.sidebar.markdown("## 🎛️ Filters")
 
     # Search
-    search = st.sidebar.text_input("🔍 Search posts", placeholder="Enter keywords...")
+    search = st.sidebar.text_input("🔍 Search", placeholder="Keywords...")
+
+    # Source filter
+    if 'source' in df.columns and len(df) > 0:
+        sources = ["All"] + df['source'].unique().tolist()
+        selected_source = st.sidebar.selectbox("📡 Source", sources)
+    else:
+        selected_source = "All"
 
     # Date filter
-    st.sidebar.markdown("### 📅 Date Range")
     if len(df) > 0:
-        dates = df['date'].dt.date.unique()
-        date_options = ["All Dates"] + sorted([str(d) for d in dates], reverse=True)
-        selected_date = st.sidebar.selectbox("Select date", date_options)
+        dates = ["All"] + sorted([str(d) for d in df['date'].dt.date.unique()], reverse=True)
+        selected_date = st.sidebar.selectbox("📅 Date", dates)
     else:
-        selected_date = "All Dates"
+        selected_date = "All"
 
-    # Score filter
-    if 'final_score' in df.columns and len(df) > 0:
-        st.sidebar.markdown("### ⭐ Score Range")
-        score_min = float(df['final_score'].min())
-        score_max = float(df['final_score'].max())
-        # Ensure reasonable range
-        score_max = max(score_max, 15.0)  # Allow for combined scores > 10
-        min_score, max_score = st.sidebar.slider(
-            "Filter by score",
-            min_value=0.0,
-            max_value=score_max,
-            value=(0.0, score_max),  # Default to show ALL posts
-            step=0.5
-        )
-    else:
-        min_score, max_score = 0.0, 20.0
+    # Status filter
+    status_filter = st.sidebar.radio("✓ Status", ["All", "Unused", "Used"])
 
-    # Trending filter
-    if 'trending_boost' in df.columns:
-        st.sidebar.markdown("### 🔥 Trending")
-        trending_only = st.sidebar.checkbox("Show trending only")
-    else:
-        trending_only = False
-
-    # Used filter
-    st.sidebar.markdown("### ✓ Used Status")
-    used_filter = st.sidebar.radio(
-        "Filter by status",
-        ["Unused First", "All Posts", "Unused Only", "Used Only"]
-    )
-
-    # Character count filter
-    st.sidebar.markdown("### 📏 Length")
-    length_filter = st.sidebar.radio(
-        "Filter by length",
-        ["All", "Optimal (1400-2100)", "Too Short (<1400)", "Too Long (>2100)"]
-    )
+    # Length filter
+    length_filter = st.sidebar.radio("📏 Length", ["All", "Optimal", "Short", "Long"])
 
     # Apply filters
     filtered = df.copy()
@@ -466,59 +974,32 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
         )
         filtered = filtered[mask]
 
-    if selected_date != "All Dates":
+    if selected_source != "All":
+        filtered = filtered[filtered['source'] == selected_source]
+
+    if selected_date != "All":
         filtered = filtered[filtered['date'].dt.date == pd.to_datetime(selected_date).date()]
 
-    if 'final_score' in filtered.columns:
-        filtered = filtered[
-            (filtered['final_score'] >= min_score) &
-            (filtered['final_score'] <= max_score)
-        ]
-
-    if trending_only and 'trending_boost' in filtered.columns:
-        filtered = filtered[filtered['trending_boost'] > 0]
+    if 'used' in filtered.columns:
+        if status_filter == "Unused":
+            filtered = filtered[~filtered['used']]
+        elif status_filter == "Used":
+            filtered = filtered[filtered['used']]
 
     if 'char_count' in filtered.columns:
-        if length_filter == "Optimal (1400-2100)":
+        if length_filter == "Optimal":
             filtered = filtered[(filtered['char_count'] >= 1400) & (filtered['char_count'] <= 2100)]
-        elif length_filter == "Too Short (<1400)":
+        elif length_filter == "Short":
             filtered = filtered[filtered['char_count'] < 1400]
-        elif length_filter == "Too Long (>2100)":
+        elif length_filter == "Long":
             filtered = filtered[filtered['char_count'] > 2100]
-
-    # Apply used filter
-    if 'used' in filtered.columns:
-        if used_filter == "Unused Only":
-            filtered = filtered[~filtered['used']]
-        elif used_filter == "Used Only":
-            filtered = filtered[filtered['used']]
-        elif used_filter == "Unused First":
-            # Sort unused posts first (will be applied with other sorting later)
-            filtered['_sort_used'] = filtered['used'].astype(int)
 
     # Stats
     st.sidebar.markdown("---")
-    used_count = len(df[df['used'] == True]) if 'used' in df.columns else 0
-    unused_count = len(df) - used_count
-    st.sidebar.markdown(f"**Showing {len(filtered)} of {len(df)} posts**")
-    st.sidebar.markdown(f"📊 {unused_count} unused • {used_count} used")
+    st.sidebar.markdown(f"**Showing {len(filtered)} of {len(df)}**")
 
-    # Quick actions
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚡ Quick Actions")
-
-    if st.sidebar.button("🔄 Refresh Data"):
-        st.cache_data.clear()
+    if st.sidebar.button("🔄 Refresh", use_container_width=True):
         st.rerun()
-
-    if st.sidebar.button("📥 Export to CSV"):
-        csv = filtered.to_csv(index=False)
-        st.sidebar.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"linkedin_posts_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
 
     return filtered
 
@@ -528,85 +1009,81 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 def main():
-    # Header
-    st.markdown("""
-    <div style="text-align: center; padding: 1rem 0 2rem 0;">
-        <h1 style="margin: 0;">💼 LinkedIn Content Studio</h1>
-        <p style="color: #666; margin-top: 0.5rem;">Review, refine, and publish your AI-generated posts</p>
-    </div>
-    """, unsafe_allow_html=True)
+    render_header()
 
-    # Load data
-    df = load_data()
+    tab_posts, tab_agent, tab_sources = st.tabs(["📝 Content Library", "🤖 Generate New", "📡 Sources"])
 
-    if df.empty:
+    with tab_posts:
+        df = load_data()
+
+        if df.empty:
+            st.markdown("""
+            <div class="empty-state">
+                <h2>📭 No Content Yet</h2>
+                <p>Go to "Generate New" to create your first LinkedIn posts</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            filtered_df = render_sidebar(df)
+            render_metrics(df)
+
+            st.markdown("### 📊 Distribution by Source")
+            render_source_stats(df)
+
+            st.markdown(f"### 📝 Posts ({len(filtered_df)})")
+
+            sort_by = st.selectbox("Sort by", ["Newest", "Oldest", "Score ↓", "Score ↑"], label_visibility="collapsed")
+
+            if sort_by == "Newest":
+                filtered_df = filtered_df.sort_values('date', ascending=False)
+            elif sort_by == "Oldest":
+                filtered_df = filtered_df.sort_values('date', ascending=True)
+            elif sort_by == "Score ↓" and 'final_score' in filtered_df.columns:
+                filtered_df = filtered_df.sort_values('final_score', ascending=False)
+            elif sort_by == "Score ↑" and 'final_score' in filtered_df.columns:
+                filtered_df = filtered_df.sort_values('final_score', ascending=True)
+
+            for idx, row in filtered_df.iterrows():
+                render_post_card(row, idx)
+
+    with tab_agent:
+        render_agent_control()
+
+    with tab_sources:
+        st.markdown("### 📡 Content Sources")
+        st.markdown("The agent gathers AI/ML content from these platforms:")
+
+        # Use columns for better layout
+        source_cols = st.columns(2)
+        for idx, (key, config) in enumerate(SOURCE_CONFIG.items()):
+            with source_cols[idx % 2]:
+                st.markdown(f"""
+                    <div style="background: white; border-radius: 10px; padding: 1rem; margin: 0.5rem 0;
+                                box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; align-items: center; gap: 1rem;">
+                        <div style="font-size: 2rem; width: 50px; height: 50px; display: flex; align-items: center;
+                                    justify-content: center; border-radius: 10px; background: {config['color']}20;">
+                            {config['icon']}
+                        </div>
+                        <div>
+                            <div style="font-weight: 600; font-size: 1.1rem; color: #1e293b;">{config['name']}</div>
+                            <div style="color: #64748b; font-size: 0.85rem;">AI-related content</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("### 📰 RSS Feeds")
         st.markdown("""
-        <div style="text-align: center; padding: 3rem; background: #f8f9fa; border-radius: 12px;">
-            <h2>📭 No Posts Yet</h2>
-            <p>Run the agent to generate your first LinkedIn posts:</p>
-            <code style="background: #e9ecef; padding: 0.5rem 1rem; border-radius: 4px;">
-                python agent_local.py
-            </code>
-        </div>
-        """, unsafe_allow_html=True)
-        return
+        **AI Labs:** OpenAI, Anthropic, Google AI, DeepMind, Meta AI, NVIDIA
 
-    # Sidebar filters
-    filtered_df = render_sidebar(df)
+        **Startups:** Hugging Face, Stability AI, Cohere, Mistral AI, Replicate, Together AI, Groq, Perplexity, LangChain, LlamaIndex
 
-    # Metrics row
-    st.markdown("### 📊 Overview")
-    render_metrics(df)
+        **Cloud:** AWS ML, Google Cloud AI, Azure AI, Databricks
 
-    st.markdown("---")
+        **News:** TechCrunch, VentureBeat, Wired, The Verge, MIT Tech Review
 
-    # Posts
-    if len(filtered_df) == 0:
-        st.warning("No posts match your filters. Try adjusting the criteria.")
-        return
-
-    st.markdown(f"### 📝 Posts ({len(filtered_df)})")
-
-    # Sort options
-    sort_col1, sort_col2 = st.columns([1, 4])
-    with sort_col1:
-        sort_by = st.selectbox(
-            "Sort by",
-            ["Date (Newest)", "Date (Oldest)", "Score (High)", "Score (Low)", "Length"],
-            label_visibility="collapsed"
-        )
-
-    # Apply sorting (with used posts pushed to bottom if "Unused First" is selected)
-    has_sort_used = '_sort_used' in filtered_df.columns
-
-    if sort_by == "Date (Newest)":
-        sort_cols = ['_sort_used', 'date'] if has_sort_used else ['date']
-        sort_asc = [True, False] if has_sort_used else [False]
-        filtered_df = filtered_df.sort_values(sort_cols, ascending=sort_asc)
-    elif sort_by == "Date (Oldest)":
-        sort_cols = ['_sort_used', 'date'] if has_sort_used else ['date']
-        sort_asc = [True, True] if has_sort_used else [True]
-        filtered_df = filtered_df.sort_values(sort_cols, ascending=sort_asc)
-    elif sort_by == "Score (High)" and 'final_score' in filtered_df.columns:
-        sort_cols = ['_sort_used', 'final_score'] if has_sort_used else ['final_score']
-        sort_asc = [True, False] if has_sort_used else [False]
-        filtered_df = filtered_df.sort_values(sort_cols, ascending=sort_asc)
-    elif sort_by == "Score (Low)" and 'final_score' in filtered_df.columns:
-        sort_cols = ['_sort_used', 'final_score'] if has_sort_used else ['final_score']
-        sort_asc = [True, True] if has_sort_used else [True]
-        filtered_df = filtered_df.sort_values(sort_cols, ascending=sort_asc)
-    elif sort_by == "Length" and 'char_count' in filtered_df.columns:
-        sort_cols = ['_sort_used', 'char_count'] if has_sort_used else ['char_count']
-        sort_asc = [True, False] if has_sort_used else [False]
-        filtered_df = filtered_df.sort_values(sort_cols, ascending=sort_asc)
-
-    # Clean up temp column
-    if has_sort_used:
-        filtered_df = filtered_df.drop(columns=['_sort_used'])
-
-    # Render posts
-    for idx, row in filtered_df.iterrows():
-        render_post_card(row, idx)
+        **Research:** BAIR, Stanford AI, Allen AI, EleutherAI
+        """)
 
 
 if __name__ == "__main__":

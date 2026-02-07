@@ -12,7 +12,6 @@ import os
 import re
 import time
 import hashlib
-import random
 import pandas as pd
 import requests
 import feedparser
@@ -89,10 +88,51 @@ class ContentScout:
     """Unified scout for all content sources."""
 
     AI_KEYWORDS = [
-        'ai', 'llm', 'gpt', 'claude', 'openai', 'anthropic', 'machine learning',
-        'rag', 'langchain', 'agent', 'transformer', 'embedding', 'vector',
-        'fine-tun', 'neural', 'deep learning', 'nlp', 'chatbot', 'copilot',
-        'ollama', 'llama', 'mistral', 'diffusion', 'huggingface'
+        # Core AI/ML
+        'ai', 'llm', 'machine learning', 'deep learning', 'neural', 'artificial intelligence',
+        'ml', 'mlops', 'automl', 'tensorflow', 'pytorch', 'keras', 'scikit', 'sklearn',
+
+        # LLMs & Models
+        'gpt', 'gpt-4', 'gpt4', 'gpt-3', 'gpt-3.5', 'gpt-neo', 'gpt-neox', 'gptj',
+        'claude', 'claude2', 'anthropic', 'openai', 'gemini', 'bard', 'grok',
+        'llama', 'mistral', 'bloom', 'falcon', 'phi-', 'qwen', 'deepseek',
+        'ollama', 'huggingface', 'transformers', 'tokenizer',
+
+        # GenAI & Diffusion
+        'generative', 'genai', 'diffusion', 'stable diffusion', 'dalle', 'midjourney',
+        'text-to-image', 'image generation', 'whisper', 'speech-to-text', 'tts',
+
+        # Agentic AI & RAG
+        'agentic', 'agent', 'multi-agent', 'autonomous agent', 'ai agent',
+        'rag', 'retrieval augmented', 'langchain', 'langgraph', 'langsmith',
+        'llamaindex', 'crewai', 'autogen', 'dify', 'flowise',
+        'mcp', 'model context protocol', 'tool use', 'function calling',
+
+        # Vector & Embeddings
+        'embedding', 'vector', 'vector db', 'vector database', 'vectorstore',
+        'pinecone', 'weaviate', 'chroma', 'faiss', 'milvus', 'qdrant', 'vectara', 'lancedb',
+        'semantic search', 'similarity search', 'contextual search',
+
+        # NLP & Text
+        'nlp', 'natural language', 'chatbot', 'conversational', 'copilot',
+        'prompt engineering', 'zero-shot', 'few-shot', 'fine-tun', 'lora', 'qlora',
+        'instruction tuning', 'rlhf', 'dpo',
+
+        # Data Science
+        'data science', 'datascience', 'pandas', 'numpy', 'scipy', 'matplotlib',
+        'jupyter', 'notebook', 'analytics', 'data analysis', 'visualization',
+        'statistics', 'predictive', 'forecasting', 'time series',
+
+        # Computer Vision
+        'computer vision', 'cv', 'object detection', 'image classification',
+        'yolo', 'opencv', 'segmentation', 'ocr',
+
+        # MLOps & Infrastructure
+        'model serving', 'inference', 'triton', 'vllm', 'tgi',
+        'weights', 'checkpoint', 'quantization', 'gguf', 'ggml',
+
+        # Research & Benchmarks
+        'benchmark', 'evaluation', 'leaderboard', 'arxiv', 'paper'
     ]
 
     SKIP_REPOS = {'langchain', 'dify', 'ollama', 'transformers', 'pytorch',
@@ -124,23 +164,55 @@ class ContentScout:
     def _hash(self, text: str) -> str:
         return hashlib.md5(text.encode()).hexdigest()[:12]
 
-    def fetch_all(self, seen_links: Set[str], limit_per_source: int = 5) -> List[ContentItem]:
-        """Fetch from all sources (filtered by date)."""
+    def fetch_all(self, seen_links: Set[str], limit_per_source: int = 5, sources: List[str] = None) -> List[ContentItem]:
+        """Fetch from specified sources (filtered by date).
+
+        Args:
+            seen_links: Set of already processed URLs
+            limit_per_source: Max items per source
+            sources: List of source names to fetch from. If None, fetch from all.
+                     Valid: github, hackernews, reddit, producthunt, papers, arxiv, devto, rss
+        """
         items = []
 
+        # Default to all sources if none specified
+        all_sources = ['github', 'hackernews', 'reddit', 'producthunt', 'papers', 'arxiv', 'devto', 'rss']
+        active_sources = sources if sources else all_sources
+
         print(f"\n📡 Gathering hot topics from last {self.max_age_days} days...")
+        print(f"   Active sources: {', '.join(active_sources)}")
 
         # GitHub Trending
-        items.extend(self._fetch_github(limit_per_source))
+        if 'github' in active_sources:
+            items.extend(self._fetch_github(limit_per_source))
 
         # Hacker News
-        items.extend(self._fetch_hackernews(limit_per_source))
+        if 'hackernews' in active_sources:
+            items.extend(self._fetch_hackernews(limit_per_source))
 
         # Reddit
-        items.extend(self._fetch_reddit(limit_per_source))
+        if 'reddit' in active_sources:
+            items.extend(self._fetch_reddit(limit_per_source))
 
-        # RSS Feeds
-        items.extend(self._fetch_rss(seen_links, limit_per_source))
+        # Product Hunt AI
+        if 'producthunt' in active_sources:
+            items.extend(self._fetch_producthunt(limit_per_source))
+
+        # Papers with Code
+        if 'papers' in active_sources:
+            items.extend(self._fetch_papers_with_code(limit_per_source))
+
+        # Arxiv AI/ML
+        if 'arxiv' in active_sources:
+            items.extend(self._fetch_arxiv(limit_per_source))
+
+        # Dev.to AI articles
+        if 'devto' in active_sources:
+            items.extend(self._fetch_devto(limit_per_source))
+
+        # RSS Feeds (expanded)
+        if 'rss' in active_sources:
+            items.extend(self._fetch_rss(seen_links, limit_per_source))
 
         # Filter duplicates and already seen
         unique = []
@@ -157,61 +229,79 @@ class ContentScout:
         return unique
 
     def _fetch_github(self, limit: int) -> List[ContentItem]:
-        """Fetch trending GitHub repos."""
+        """Fetch trending GitHub repos from multiple languages."""
         items = []
+        seen_repos = set()  # Avoid duplicates across languages
         try:
-            url = "https://github.com/trending/python?since=daily"
-            resp = requests.get(url, headers=self.headers, timeout=15)
-            if resp.status_code != 200:
-                return items
+            # Map max_age_days to GitHub's since parameter
+            if self.max_age_days <= 1:
+                since = "daily"
+            elif self.max_age_days <= 7:
+                since = "weekly"
+            else:
+                since = "monthly"
 
-            soup = BeautifulSoup(resp.content, 'lxml')
-            for article in soup.find_all('article', class_='Box-row')[:20]:
-                try:
-                    h2 = article.find('h2')
-                    if not h2:
-                        continue
-                    link = h2.find('a')
-                    if not link:
-                        continue
+            # Fetch from Python and Jupyter Notebook trending
+            languages = ["python", "jupyter-notebook"]
 
-                    full_name = link.get('href', '').strip('/')
-                    name = full_name.split('/')[-1].lower()
-
-                    # Skip famous repos
-                    if any(skip in name for skip in self.SKIP_REPOS):
-                        continue
-
-                    desc = article.find('p', class_='col-9')
-                    description = desc.get_text(strip=True) if desc else ""
-
-                    if not self._is_ai_related(f"{name} {description}"):
-                        continue
-
-                    # Get stars
-                    stars_elem = article.find('a', href=lambda x: x and '/stargazers' in x)
-                    stars = 0
-                    if stars_elem:
-                        stars_text = stars_elem.get_text(strip=True).replace(',', '')
-                        stars = int(stars_text) if stars_text.isdigit() else 0
-
-                    # Skip if too famous (>50k stars)
-                    if stars > 50000:
-                        continue
-
-                    items.append(ContentItem(
-                        title=f"{full_name}: {description[:80]}",
-                        url=f"https://github.com/{full_name}",
-                        source="github",
-                        summary=description,
-                        metrics={'stars': stars},
-                        image_url=f"https://opengraph.githubassets.com/1/{full_name}",
-                        timestamp=datetime.now().timestamp()  # Trending = fresh today
-                    ))
-                except:
+            for lang in languages:
+                url = f"https://github.com/trending/{lang}?since={since}"
+                resp = requests.get(url, headers=self.headers, timeout=15)
+                if resp.status_code != 200:
                     continue
 
-            print(f"   🐙 GitHub: {len(items)} repos")
+                soup = BeautifulSoup(resp.content, 'lxml')
+                for article in soup.find_all('article', class_='Box-row')[:25]:
+                    try:
+                        h2 = article.find('h2')
+                        if not h2:
+                            continue
+                        link = h2.find('a')
+                        if not link:
+                            continue
+
+                        full_name = link.get('href', '').strip('/')
+                        name = full_name.split('/')[-1].lower()
+
+                        # Skip duplicates across languages
+                        if full_name in seen_repos:
+                            continue
+                        seen_repos.add(full_name)
+
+                        # Skip famous repos
+                        if any(skip in name for skip in self.SKIP_REPOS):
+                            continue
+
+                        desc = article.find('p', class_='col-9')
+                        description = desc.get_text(strip=True) if desc else ""
+
+                        if not self._is_ai_related(f"{name} {description}"):
+                            continue
+
+                        # Get stars
+                        stars_elem = article.find('a', href=lambda x: x and '/stargazers' in x)
+                        stars = 0
+                        if stars_elem:
+                            stars_text = stars_elem.get_text(strip=True).replace(',', '')
+                            stars = int(stars_text) if stars_text.isdigit() else 0
+
+                        # Skip if too famous (>50k stars)
+                        if stars > 50000:
+                            continue
+
+                        items.append(ContentItem(
+                            title=f"{full_name}: {description[:80]}",
+                            url=f"https://github.com/{full_name}",
+                            source="github",
+                            summary=description,
+                            metrics={'stars': stars},
+                            image_url=f"https://opengraph.githubassets.com/1/{full_name}",
+                            timestamp=datetime.now().timestamp()
+                        ))
+                    except:
+                        continue
+
+            print(f"   🐙 GitHub ({since}): {len(items)} repos")
         except Exception as e:
             print(f"   ⚠️ GitHub error: {e}")
         return items[:limit]
@@ -265,7 +355,7 @@ class ContentScout:
     def _fetch_reddit(self, limit: int) -> List[ContentItem]:
         """Fetch hot posts from AI subreddits (filtered by date)."""
         items = []
-        subreddits = ['LocalLLaMA', 'MachineLearning', 'ClaudeAI', 'ChatGPT', 'ollama']
+        subreddits = ['LocalLLaMA', 'MachineLearning', 'ClaudeAI', 'ChatGPT', 'ollama', 'AgeniticsAI', 'ArtificialIntelligence', 'GPT4All', 'MistralAI']
 
         try:
             for sub in subreddits:
@@ -303,14 +393,267 @@ class ContentScout:
             print(f"   ⚠️ Reddit error: {e}")
         return items[:limit]
 
+    def _fetch_producthunt(self, limit: int) -> List[ContentItem]:
+        """Fetch AI products from Product Hunt."""
+        items = []
+        try:
+            # Product Hunt doesn't have a public API, use their RSS/feed
+            resp = requests.get(
+                "https://www.producthunt.com/feed?category=artificial-intelligence",
+                headers=self.headers,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                feed = feedparser.parse(resp.content)
+                for entry in feed.entries[:15]:
+                    title = entry.get('title', '')
+                    if not self._is_ai_related(title):
+                        continue
+
+                    date_struct = entry.get('published_parsed') or entry.get('updated_parsed')
+                    if not self._is_recent(date_struct=date_struct):
+                        continue
+
+                    ts = 0.0
+                    if date_struct:
+                        try:
+                            ts = datetime(*date_struct[:6]).timestamp()
+                        except:
+                            pass
+
+                    items.append(ContentItem(
+                        title=title,
+                        url=entry.get('link', ''),
+                        source="producthunt",
+                        summary=entry.get('summary', '')[:300],
+                        metrics={'votes': 100},  # PH doesn't expose votes in RSS
+                        timestamp=ts
+                    ))
+
+            print(f"   🚀 Product Hunt: {len(items)} products")
+        except Exception as e:
+            print(f"   ⚠️ Product Hunt error: {e}")
+        return items[:limit]
+
+    def _fetch_papers_with_code(self, limit: int) -> List[ContentItem]:
+        """Fetch trending papers from Papers with Code via web scraping."""
+        items = []
+        try:
+            # Scrape the trending page directly
+            resp = requests.get(
+                "https://paperswithcode.com/",
+                headers=self.headers,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+
+                # Find paper cards on the homepage
+                paper_cards = soup.select('.paper-card, .row.infinite-item')[:20]
+
+                for card in paper_cards:
+                    # Get title
+                    title_elem = card.select_one('h1 a, .item-content h1 a, .paper-card-title a')
+                    if not title_elem:
+                        continue
+
+                    title = title_elem.get_text(strip=True)
+                    href = title_elem.get('href', '')
+
+                    if not title or not href:
+                        continue
+
+                    # Build full URL
+                    paper_url = f"https://paperswithcode.com{href}" if href.startswith('/') else href
+
+                    # Get abstract/summary if available
+                    abstract_elem = card.select_one('.item-strip-abstract, .paper-abstract')
+                    abstract = abstract_elem.get_text(strip=True)[:400] if abstract_elem else ''
+
+                    if not self._is_ai_related(f"{title} {abstract}"):
+                        continue
+
+                    items.append(ContentItem(
+                        title=title,
+                        url=paper_url,
+                        source="papers",
+                        summary=abstract,
+                        metrics={},
+                        timestamp=datetime.now().timestamp()
+                    ))
+
+            print(f"   📄 Papers with Code: {len(items)} papers")
+        except Exception as e:
+            print(f"   ⚠️ Papers with Code error: {e}")
+        return items[:limit]
+
+    def _fetch_arxiv(self, limit: int) -> List[ContentItem]:
+        """Fetch latest AI/ML papers from Arxiv."""
+        items = []
+        try:
+            # Arxiv API for cs.AI and cs.LG categories
+            categories = "cat:cs.AI+OR+cat:cs.LG+OR+cat:cs.CL"
+            resp = requests.get(
+                f"http://export.arxiv.org/api/query?search_query={categories}&sortBy=submittedDate&sortOrder=descending&max_results=30",
+                headers=self.headers,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                feed = feedparser.parse(resp.content)
+                for entry in feed.entries[:20]:
+                    title = entry.get('title', '').replace('\n', ' ')
+                    summary = entry.get('summary', '').replace('\n', ' ')
+
+                    # Check relevance
+                    if not self._is_ai_related(f"{title} {summary}"):
+                        continue
+
+                    # Check date
+                    date_struct = entry.get('published_parsed')
+                    if not self._is_recent(date_struct=date_struct):
+                        continue
+
+                    ts = 0.0
+                    if date_struct:
+                        try:
+                            ts = datetime(*date_struct[:6]).timestamp()
+                        except:
+                            pass
+
+                    items.append(ContentItem(
+                        title=title,
+                        url=entry.get('link', ''),
+                        source="arxiv",
+                        summary=summary[:400],
+                        metrics={},
+                        timestamp=ts
+                    ))
+
+            print(f"   🔬 Arxiv: {len(items)} papers")
+        except Exception as e:
+            print(f"   ⚠️ Arxiv error: {e}")
+        return items[:limit]
+
+    def _fetch_devto(self, limit: int) -> List[ContentItem]:
+        """Fetch AI/ML articles from Dev.to."""
+        items = []
+        try:
+            # Dev.to API for AI-related articles
+            for tag in ['ai', 'machinelearning', 'llm', 'openai', 'chatgpt']:
+                resp = requests.get(
+                    f"https://dev.to/api/articles?tag={tag}&top=7&per_page=10",
+                    headers=self.headers,
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    continue
+
+                for article in resp.json()[:5]:
+                    title = article.get('title', '')
+
+                    # Check date
+                    pub_date = article.get('published_at')
+                    if pub_date:
+                        try:
+                            article_date = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
+                            if article_date.replace(tzinfo=None) < self.cutoff_date:
+                                continue
+                            ts = article_date.timestamp()
+                        except:
+                            ts = datetime.now().timestamp()
+                    else:
+                        ts = datetime.now().timestamp()
+
+                    items.append(ContentItem(
+                        title=title,
+                        url=article.get('url', ''),
+                        source="devto",
+                        summary=article.get('description', '')[:300],
+                        metrics={'reactions': article.get('positive_reactions_count', 0)},
+                        timestamp=ts
+                    ))
+
+            # Dedupe by URL
+            seen_urls = set()
+            unique_items = []
+            for item in items:
+                if item.url not in seen_urls:
+                    seen_urls.add(item.url)
+                    unique_items.append(item)
+            items = unique_items
+
+            print(f"   📝 Dev.to: {len(items)} articles")
+        except Exception as e:
+            print(f"   ⚠️ Dev.to error: {e}")
+        return items[:limit]
+
     def _fetch_rss(self, seen_links: Set[str], limit: int) -> List[ContentItem]:
         """Fetch from RSS feeds (filtered by date)."""
         items = []
         feeds = [
+            # === PRIMARY AI LABS (Highest Priority) ===
             "https://huggingface.co/blog/feed.xml",
             "https://openai.com/blog/rss.xml",
+            "https://www.anthropic.com/rss.xml",
+            "https://ai.googleblog.com/feeds/posts/default",
+            "https://deepmind.google/blog/rss.xml",
+            "https://blogs.nvidia.com/feed/",
+            "https://ai.meta.com/blog/rss/",
+
+            # === AI STARTUP BLOGS (Tool & Library Announcements) ===
+            "https://stability.ai/blog/rss.xml",
+            "https://cohere.com/blog/rss.xml",
+            "https://mistral.ai/feed.xml",
+            "https://replicate.com/blog/rss.xml",
+            "https://modal.com/blog/rss.xml",
+            "https://www.together.ai/blog/rss.xml",
+            "https://wow.groq.com/feed/",
+            "https://www.perplexity.ai/blog/rss.xml",
+            "https://www.anyscale.com/blog/rss.xml",
+            "https://www.weights-biases.com/blog/rss",
+            "https://www.langchain.com/blog/rss.xml",
+            "https://blog.llamaindex.ai/feed",
+            "https://unsloth.ai/blog/rss.xml",
+
+            # === CLOUD AI PLATFORMS ===
+            "https://aws.amazon.com/blogs/machine-learning/feed/",
+            "https://cloud.google.com/blog/products/ai-machine-learning/rss",
+            "https://azure.microsoft.com/en-us/blog/tag/ai/feed/",
+            "https://www.databricks.com/blog/category/artificial-intelligence/feed",
+
+            # === TECH NEWS (AI Focus) ===
             "https://techcrunch.com/category/artificial-intelligence/feed/",
             "https://venturebeat.com/category/ai/feed/",
+            "https://www.wired.com/feed/tag/ai/latest/rss",
+            "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+            "https://arstechnica.com/tag/artificial-intelligence/feed/",
+            "https://www.technologyreview.com/topic/artificial-intelligence/feed",
+            "https://www.marktechpost.com/feed/",
+            "https://the-decoder.com/feed/",
+
+            # === RESEARCH & ACADEMIC ===
+            "https://bair.berkeley.edu/blog/feed.xml",
+            "https://lilianweng.github.io/index.xml",
+            "https://karpathy.github.io/feed.xml",
+            "https://colah.github.io/rss.xml",
+            "https://distill.pub/rss.xml",
+            "https://ai.stanford.edu/blog/feed.xml",
+            "https://blog.allenai.org/feed",
+            "https://www.eleuther.ai/blog/rss.xml",
+
+            # === DEVELOPER & ENGINEERING ===
+            "https://engineering.fb.com/feed/",
+            "https://netflixtechblog.com/feed",
+            "https://blog.google/technology/ai/rss/",
+            "https://github.blog/feed/",
+            "https://sourcegraph.com/blog/rss.xml",
+
+            # === NEWSLETTERS & CURATED ===
+            "https://www.deeplearning.ai/the-batch/feed/",
+            "https://jack-clark.net/feed/",
+            "https://lastweekin.ai/feed",
+            "https://therundownai.com/feed",
+            "https://www.aiweekly.co/feed",
         ]
 
         try:
@@ -392,46 +735,28 @@ class ContentExtractor:
             return None
 
 # ============================================================
-# SMART POST WRITER
+# SMART POST WRITER - LinkedIn SEO Optimized Template
 # ============================================================
 
 class SmartWriter:
-    """Generates varied LinkedIn posts with different styles."""
-
-    # Different writing styles - NOT all posts need "My Take"
-    STYLES = [
-        "insight",      # Share insight/analysis
-        "discovery",    # "Just discovered..." casual
-        "breakdown",    # Technical breakdown
-        "question",     # Lead with question
-        "story",        # Mini story format
-        "list",         # Listicle style
-    ]
+    """Generates LinkedIn posts using the Insight & SEO template."""
 
     def __init__(self, model_name: str = MODEL_NAME):
         self.llm = ChatOllama(model=model_name, temperature=0.85)
         self.verifier = PostVerifier()
 
     def write(self, item: ContentItem, content: str = "", max_retries: int = 2) -> Optional[str]:
-        """Generate a post with randomly selected style. Retries if verification fails."""
+        """Generate a LinkedIn post using the SEO-optimized template."""
 
         for attempt in range(max_retries + 1):
-            style = random.choice(self.STYLES)
-
             prompt = ChatPromptTemplate.from_messages([
-                ("system", self._get_system_prompt(style)),
+                ("system", self._get_system_prompt()),
                 ("user", self._get_user_prompt(item, content))
             ])
 
             try:
                 chain = prompt | self.llm | StrOutputParser()
-                result = chain.invoke({
-                    "title": item.title,
-                    "url": item.url,
-                    "source": item.source,
-                    "summary": item.summary,
-                    "metrics": str(item.metrics)
-                })
+                result = chain.invoke({})
                 post = self._clean_output(result)
 
                 # Ensure URL is in the post
@@ -446,7 +771,7 @@ class SmartWriter:
                     print(f"   🔄 Retry {attempt + 1}: {issues}")
                     continue
                 else:
-                    return post  # Return anyway on last attempt
+                    return post
 
             except Exception as e:
                 print(f"   ⚠️ Write error: {e}")
@@ -454,86 +779,146 @@ class SmartWriter:
                     return None
         return None
 
-    def _get_system_prompt(self, style: str) -> str:
-        """Get style-specific system prompt."""
+    def _get_system_prompt(self) -> str:
+        """The single, clean LinkedIn template."""
 
-        base = """You write engaging LinkedIn posts about AI/tech.
-Write naturally like a tech professional sharing insights - NOT like marketing copy.
+        return """You are an AI/ML thought leader writing LinkedIn posts that drive engagement and are optimized for recruiter search algorithms.
 
-CRITICAL REQUIREMENTS:
-1. LENGTH: Write 1400-1800 characters (about 250-300 words). Posts under 1000 chars will be rejected.
-2. URL: You MUST include the full source URL in the post body (copy it exactly as provided)
-3. HASHTAGS: End with exactly 5 relevant hashtags on the last line
+Follow this template structure, but be CREATIVE with your writing and emoji choices.
 
-BANNED:
-- "Imagine...", "As an engineer...", placeholder brackets like [hook], "Feel free to..."
-- Generic filler text - every sentence must add value
-- Mentioning star counts, upvote counts, or point counts (e.g. "10,000 stars", "500 upvotes")
-- Social proof metrics - focus on the CONTENT value, not popularity numbers"""
+══════════════════════════════════════════════════════════════
+THE "INSIGHT & SEO" LINKEDIN TEMPLATE
+══════════════════════════════════════════════════════════════
 
-        style_instructions = {
-            "insight": """
-Style: Share a key insight or analysis.
-Start with a bold statement about what you learned or noticed.
-Explain WHY it matters. Add your perspective. End with a thought-provoking question.""",
+SECTION 1 - HOOK (1-2 sentences)
+Write a controversial statement, surprising insight, or strong opinion that stops the scroll.
+Use a relevant emoji at the end (choose based on topic - could be ⚠️ 🔥 ⚡ 🎯 💥 🧠 etc.)
+Make it specific and bold. Challenge conventional thinking.
 
-            "discovery": """
-Style: Casual discovery share.
-Start like "Just came across..." or "Found something interesting..."
-Keep it conversational. Share what caught your attention and why others should care.""",
+SECTION 2 - THE CORE INSIGHT (3-4 sentences)
+Explain the current problem or state of affairs.
+Why does this matter RIGHT NOW? What's at stake?
+Add depth and context. Use a relevant emoji to start.
 
-            "breakdown": """
-Style: Technical breakdown.
-Lead with the core technical innovation.
-Break down 3-4 key technical aspects with bullet points.
-Explain practical implications.""",
+SECTION 3 - THE SOLUTION / BREAKDOWN
+Explain how this tool/technology/approach addresses the problem.
+List 3-5 bullet points with **bold headers**:
+• **Point 1:** Detailed explanation of the benefit or feature
+• **Point 2:** Another key advantage with specifics
+• **Point 3:** Technical detail that matters to practitioners
+• **Point 4:** (optional) Additional insight
+• **Point 5:** (optional) Practical application
 
-            "question": """
-Style: Lead with a provocative question.
-Start with a question that makes people think.
-Then provide context and your thoughts. End asking for others' opinions.""",
+Each bullet should be 1-2 sentences, not just a few words.
 
-            "story": """
-Style: Mini narrative.
-Start with a specific moment or scenario.
-Build to the insight or tool. Make it relatable.""",
+SECTION 4 - THE RESULT/IMPACT (2-3 sentences)
+What's the measurable outcome? Efficiency gain? Time saved? Accuracy improvement?
+Be specific with numbers or comparisons when possible.
+Use a relevant emoji (🚀 📈 ✅ 💪 etc.)
 
-            "list": """
-Style: Quick valuable list.
-Start with "X things about [topic]:" or "Why [topic] matters:"
-Use numbered points. Keep each point punchy and valuable."""
-        }
+SECTION 5 - CALL TO ACTION
+Ask a specific question that invites debate or sharing experiences.
+Use either/or format OR ask about their experience.
+Examples:
+- "Are you prioritizing X or Y in your pipeline?"
+- "Have you tried this approach? What results did you see?"
+- "Which matters more in production: A or B?"
 
-        return base + style_instructions.get(style, style_instructions["insight"])
+SECTION 6 - URL & HASHTAGS
+Include the source URL on its own line.
+Then exactly 5 relevant hashtags on the final line.
+
+══════════════════════════════════════════════════════════════
+SEO KEYWORDS - NATURAL INTEGRATION (CRITICAL)
+══════════════════════════════════════════════════════════════
+
+DO NOT list keywords separately. Instead, naturally weave technical terms throughout your post:
+- Use specific technology names in context (e.g., "built with PyTorch" not "Tech Stack: PyTorch")
+- Mention frameworks, languages, and tools as part of your explanation
+- Include industry terms that recruiters search for (RAG, LLM, fine-tuning, embeddings, etc.)
+- Make it sound like natural conversation, not keyword stuffing
+
+GOOD: "This Python library leverages transformer architectures and vector databases to enable real-time RAG pipelines..."
+BAD: "🛠️ Tech Stack: Python, Transformers, Vector DB, RAG"
+
+══════════════════════════════════════════════════════════════
+FORMAT & LENGTH REQUIREMENTS
+══════════════════════════════════════════════════════════════
+
+• LENGTH: 1800-2500 characters (THIS IS CRITICAL - write substantial content)
+• Use **text** for bold (will be converted to Unicode bold)
+• Use vertical spacing between sections (blank lines for readability)
+• Mobile-friendly: paragraphs of 2-3 sentences max
+• Choose emojis that match the TOPIC (AI: 🧠, speed: ⚡, warning: ⚠️, etc.)
+• Keywords should flow naturally in sentences, not be listed
+
+══════════════════════════════════════════════════════════════
+BANNED PHRASES
+══════════════════════════════════════════════════════════════
+
+- "Imagine...", "Picture this...", "In today's world..."
+- "Just came across...", "Ever wondered...", "Excited to share..."
+- "Game changer", "Game-changer", "Revolutionary", "Groundbreaking"
+- "What do you think?" (too generic)
+- Star counts, upvotes, or GitHub metrics
+- Section headers in the output
+
+══════════════════════════════════════════════════════════════
+OUTPUT
+══════════════════════════════════════════════════════════════
+
+Write ONLY the final LinkedIn post. No explanations, no meta-commentary.
+Make it substantial (1800-2500 chars). Each section should have real depth."""
 
     def _get_user_prompt(self, item: ContentItem, content: str) -> str:
-        """Build user prompt based on content type."""
+        """Build the user prompt with source material."""
 
-        source_context = {
-            "github": "This is a trending GitHub repository gaining attention in the AI community.",
-            "hackernews": "This is generating discussion on Hacker News.",
-            "reddit": "This is a hot topic in AI Reddit communities.",
-            "rss": "This is a recent article from a tech publication."
-        }
+        return f"""Write a LinkedIn post about this topic using the Insight & SEO template.
 
-        return f"""Write a LinkedIn post about:
-
+SOURCE MATERIAL:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Title: {item.title}
-Source: {item.source}
-Context: {source_context.get(item.source, '')}
 URL: {item.url}
-Summary: {item.summary[:500] if item.summary else 'N/A'}
-Additional content: {content[:1500] if content else 'N/A'}
+Source: {item.source}
+Summary: {item.summary[:1000] if item.summary else 'N/A'}
 
-REMEMBER: Do NOT mention any numbers like stars, points, or upvotes. Focus on WHAT it does and WHY it matters.
+Additional Context:
+{content[:2500] if content else 'N/A'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Write a natural, engaging post now:"""
+CRITICAL REQUIREMENTS:
+1. LENGTH: Write 1800-2500 characters. Posts under 1500 chars will be REJECTED.
+2. Follow template: Hook → Insight → Breakdown (3-5 bullets) → Result → CTA → URL → Hashtags
+3. Hook must be bold and controversial (challenge conventional wisdom)
+4. Each bullet point should be 1-2 full sentences, not just keywords
+5. NATURALLY integrate technical keywords throughout (Python, RAG, LLM, etc.) - DO NOT list them separately
+6. Include the URL before hashtags
+7. CTA: specific either/or question or experience-based question
+8. Exactly 5 hashtags at the end
+9. Use relevant emojis creatively (not the same ones every time)
+10. Write in simple, clear language that your audience understands
+
+Write the LinkedIn post now (ONLY the post, make it SUBSTANTIAL):"""
 
     def _clean_output(self, text: str) -> str:
         """Clean and format the output."""
-        # Remove broken patterns
+        # Remove broken patterns and meta-commentary
         text = re.sub(r'^[\]\[\)\(\*\s]+', '', text.strip())
         text = re.sub(r'\*\*\s*\*\*', '', text)
+        text = re.sub(r'\n+---\n+.*$', '', text, flags=re.DOTALL)
+        text = re.sub(r'\n+Note:.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'\n+\(Note:.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'^(Here\'s the|Here is the).*?:\s*\n', '', text, flags=re.IGNORECASE)
+
+        # Remove ALL markdown headers (###, ##, #) - they don't render on LinkedIn
+        text = re.sub(r'^#{1,3}\s+.*$', '', text, flags=re.MULTILINE)
+
+        # Remove template section headers if model includes them
+        text = re.sub(r'^\s*(SECTION \d+|HOOK|INSIGHT|SOLUTION|RESULT|TECH|CTA|HASHTAG|CALL TO ACTION|THE SOLUTION|THE RESULT|THE IMPACT)[\s:]*\n?', '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+        # Remove "Tech Stack:" lines - keywords should be integrated naturally
+        text = re.sub(r'^🛠️?\s*Tech Stack:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+        text = re.sub(r'^Tech Stack:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
 
         # Convert **bold** to Unicode bold
         def to_bold(match):
@@ -543,43 +928,61 @@ Write a natural, engaging post now:"""
 
         text = re.sub(r'\*\*(.*?)\*\*', to_bold, text)
         text = re.sub(r'\*\*', '', text)
+
+        # Clean up multiple blank lines
         text = re.sub(r'\n{3,}', '\n\n', text)
+
+        # Remove any leading/trailing whitespace from lines
+        lines = [line.strip() for line in text.split('\n')]
+        text = '\n'.join(lines)
+
+        # Remove empty lines at start
+        text = re.sub(r'^\n+', '', text)
 
         return text.strip()
 
 # ============================================================
-# POST VERIFIER
+# POST VERIFIER - LinkedIn SEO Template Standards
 # ============================================================
 
 class PostVerifier:
-    """Light verification - not overly strict."""
+    """Verifies posts follow the Insight & SEO template."""
 
-    BANNED = ["imagine a world", "imagine an era", "as an ml engineer", "[hook]", "[cta]"]
+    BANNED_PHRASES = [
+        "imagine a world", "imagine an era", "picture this",
+        "in today's fast-paced", "in today's world", "in the ever-evolving",
+        "ever wondered", "have you ever", "just came across", "just found",
+        "stumbled upon", "excited to share", "happy to announce", "i'm thrilled",
+        "[hook]", "[cta]", "[insert", "game changer", "game-changer", "revolutionary",
+    ]
 
     def verify(self, post: str) -> tuple[bool, List[str]]:
-        """Verify post quality. Returns (is_valid, issues)."""
+        """Verify post follows template structure."""
         issues = []
         post_lower = post.lower()
 
         # Check banned phrases
-        for phrase in self.BANNED:
+        for phrase in self.BANNED_PHRASES:
             if phrase in post_lower:
-                issues.append(f"Contains: '{phrase}'")
+                issues.append(f"Banned: '{phrase}'")
+                break
 
-        # Check length
-        if len(post) < 800:
-            issues.append(f"Too short: {len(post)} chars")
-        elif len(post) > 2800:
+        # Check length (1500-3000 for substantial posts)
+        if len(post) < 1200:
+            issues.append(f"Too short: {len(post)} chars (need 1200+)")
+        elif len(post) > 3000:
             issues.append(f"Too long: {len(post)} chars")
 
-        # Check hashtags exist
+        # Check hashtags (need 4-6)
         hashtags = re.findall(r'#\w+', post)
-        if len(hashtags) < 3:
+        if len(hashtags) < 4:
             issues.append(f"Need more hashtags: {len(hashtags)}")
+        elif len(hashtags) > 6:
+            issues.append(f"Too many hashtags: {len(hashtags)} (max 6)")
 
         # Check has link
         if 'http' not in post:
-            issues.append("Missing link")
+            issues.append("Missing URL")
 
         return len(issues) == 0, issues
 
@@ -598,16 +1001,22 @@ def load_seen_links() -> Set[str]:
 
 
 def save_post(data: dict):
+    import csv
     df = pd.DataFrame([data])
     exists = os.path.exists(CSV_FILE)
-    df.to_csv(CSV_FILE, mode='a', header=not exists, index=False)
+    # Use QUOTE_ALL to properly handle multiline content in posts
+    df.to_csv(CSV_FILE, mode='a', header=not exists, index=False, quoting=csv.QUOTE_ALL)
 
 
-def run_agent(max_posts: int = 10, max_age_days: int = 7):
+def run_agent(max_posts: int = 10, max_age_days: int = 7, sources: List[str] = None):
     print("=" * 60)
     print("🚀 LinkedIn Content Agent v2")
     print(f"   Model: {MODEL_NAME}")
     print(f"   Filter: Last {max_age_days} days")
+    if sources:
+        print(f"   Sources: {', '.join(sources)}")
+    else:
+        print(f"   Sources: All")
     print("=" * 60)
 
     seen_links = load_seen_links()
@@ -617,8 +1026,8 @@ def run_agent(max_posts: int = 10, max_age_days: int = 7):
     extractor = ContentExtractor()
     writer = SmartWriter(MODEL_NAME)
 
-    # Fetch all content (filtered by date)
-    items = scout.fetch_all(seen_links, limit_per_source=5)
+    # Fetch content from specified sources (filtered by date)
+    items = scout.fetch_all(seen_links, limit_per_source=5, sources=sources)
 
     if not items:
         print("💤 No new content found.")
@@ -679,8 +1088,10 @@ def run_agent(max_posts: int = 10, max_age_days: int = 7):
 
 if __name__ == "__main__":
     import sys
-    # Usage: python agent_v2.py [max_posts] [max_age_days]
-    # Example: python agent_v2.py 10 7  (10 posts, last 7 days)
+    # Usage: python agent.py [max_posts] [max_age_days] [sources]
+    # Example: python agent.py 10 7 github,hackernews,reddit
+    # Sources: github, hackernews, reddit, producthunt, papers, arxiv, devto, rss
     max_posts = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     max_age_days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-    run_agent(max_posts=max_posts, max_age_days=max_age_days)
+    sources = sys.argv[3].split(',') if len(sys.argv) > 3 else None
+    run_agent(max_posts=max_posts, max_age_days=max_age_days, sources=sources)
