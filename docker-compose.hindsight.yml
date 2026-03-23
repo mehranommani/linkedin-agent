@@ -1,0 +1,35 @@
+services:
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:latest
+    ports:
+      - "8888:8888"   # API server
+      - "9999:9999"   # Control plane (web UI)
+    environment:
+      # LLM: Use local Ollama on host machine
+      - HINDSIGHT_API_LLM_PROVIDER=ollama
+      - HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:11434
+      - HINDSIGHT_API_LLM_MODEL=qwen2.5:7b
+      - HINDSIGHT_API_LLM_API_KEY=not-needed
+      - HINDSIGHT_API_LLM_TIMEOUT=180
+      # Embeddings: Use built-in local model (no external dependency)
+      - HINDSIGHT_API_EMBEDDINGS_PROVIDER=local
+      # Reranker: Use built-in local cross-encoder
+      - HINDSIGHT_API_RERANKER_PROVIDER=local
+      # Observations: Enable automatic pattern synthesis
+      - HINDSIGHT_API_ENABLE_OBSERVATIONS=true
+      # Logging
+      - HINDSIGHT_API_LOG_LEVEL=info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  hindsight-data:

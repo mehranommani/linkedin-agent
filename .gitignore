@@ -1,5 +1,6 @@
-# Data files
-linkedin_content_bank.csv
+# Database
+data/*.duckdb
+data/*.duckdb.wal
 
 # Python
 __pycache__/
@@ -11,6 +12,7 @@ venv/
 ENV/
 env/
 .venv/
+*.egg-info/
 
 # Environment variables
 .env
@@ -26,5 +28,9 @@ env/
 .DS_Store
 Thumbs.db
 
-secret.txt
-template.txt
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Docker
+ollama_data/

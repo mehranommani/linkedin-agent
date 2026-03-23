@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -m backend.db.migrate:*)",
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(grep:*)",
+      "Bash(curl:*)",
+      "Bash(python3 -m json.tool:*)",
+      "Bash(python3:*)",
+      "Bash(ollama pull:*)",
+      "Bash(lsof:*)",
+      "Bash(pgrep:*)",
+      "Bash(docker ps:*)",
+      "Bash(ollama list:*)",
+      "Bash(PYTHONPATH=. python3:*)",
+      "Bash(# Check what''s using memory ps aux --sort=-%mem | head -10 || ps -eo pid,rss,comm -r)",
+      "Bash(ps:*)",
+      "Bash(xargs kill:*)",
+      "Bash(kill:*)",
+      "WebFetch(domain:hindsight.vectorize.io)",
+      "Bash(npm run build:*)",
+      "Bash(pkill:*)",
+      "Bash(npm run dev:*)",
+      "Bash(DATABASE_PATH=/tmp/test_linkedin.db python3 -c \":*)",
+      "Bash(BASE=\"http://localhost:9001\" __NEW_LINE_e0932839267d29cd__ echo \"=== 1. Health ===\" curl -s \"$BASE/health\" __NEW_LINE_e0932839267d29cd__ echo -e \"\\\\n\\\\n=== 2. Sources ===\" curl -s \"$BASE/api/sources\")",
+      "Bash(sed -i '' 's/title ILIKE ? OR post_text ILIKE ?/title LIKE ? OR post_text LIKE ?/g' backend/mcp/tools/database.py backend/db/queries.py)",
+      "Bash(sed -i '' 's/is_active = TRUE/is_active = 1/g' backend/mcp/tools/database.py backend/db/queries.py)"
+    ]
+  }
+}

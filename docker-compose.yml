@@ -1,0 +1,48 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    environment:
+      - DATABASE_PATH=/app/data/linkedin_agent.db
+      - LLM_BACKEND=ollama
+      - OLLAMA_URL=http://ollama:11434
+      - PYTHONPATH=/app
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 9000 --reload
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
