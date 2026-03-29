@@ -1,6 +1,14 @@
-# Database
+# Database — all SQLite/DuckDB variants
+data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.duckdb
 data/*.duckdb.wal
+data/*.duckdb.migrated
+data/*.duckdb.wal.bak
+
+# Hindsight memory store (PostgreSQL data dir, bind-mounted from Docker)
+data/hindsight/
 
 # Python
 __pycache__/
@@ -31,6 +39,7 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
 
 # Docker
 ollama_data/

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import httpx
 from typing import Any
 
@@ -50,21 +51,190 @@ async def close_client() -> None:
         _client = None
 
 
-def _get_ollama_url() -> str:
-    return ConfigManager.llm().get("ollama_url", "http://localhost:11434")
+def _llm_cfg() -> dict:
+    return ConfigManager.llm()
+
+
+def _get_backend() -> str:
+    return _llm_cfg().get("backend", "ollama")
 
 
 def _get_model() -> str:
-    return ConfigManager.llm().get("model", "qwen2.5:7b")
+    return _llm_cfg().get("model", "qwen2.5:7b")
 
 
 def _get_judge_model() -> str:
-    """Model used for relevance judging — can be a larger model than the generation model."""
-    return ConfigManager.llm().get("judge_model") or _get_model()
+    return _llm_cfg().get("judge_model") or _get_model()
+
+
+def _get_ollama_url() -> str:
+    return _llm_cfg().get("ollama_url", "http://localhost:11434")
+
+
+def _load_groq_keys_from_env() -> list[str]:
+    """Load GROQ_API_KEY_1, _2, _3 ... from .env file and environment."""
+    from pathlib import Path
+
+    env_vars: dict[str, str] = {}
+    env_file = Path(__file__).parents[3] / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                env_vars[k.strip()] = v.strip()
+
+    keys: list[str] = []
+    i = 1
+    while True:
+        key = env_vars.get(f"GROQ_API_KEY_{i}") or os.environ.get(f"GROQ_API_KEY_{i}", "")
+        if not key:
+            break
+        keys.append(key)
+        i += 1
+
+    # Also accept a single GROQ_API_KEY
+    single = env_vars.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+    if single and single not in keys:
+        keys.insert(0, single)
+
+    return keys
+
+
+def _get_providers() -> list[dict]:
+    """Build provider list from .env keys + config.
+
+    Each Groq key becomes a separate provider entry.
+    Local Ollama is always the final fallback.
+    """
+    cfg = _llm_cfg()
+    groq_model = cfg.get("model", "llama-3.1-8b-instant")
+    groq_judge = cfg.get("judge_model", "llama-3.3-70b-versatile")
+
+    groq_keys = _load_groq_keys_from_env()
+    providers: list[dict] = [
+        {
+            "name": f"groq-{i+1}",
+            "api_url": "https://api.groq.com/openai/v1",
+            "api_key": key,
+            "model": groq_model,
+            "judge_model": groq_judge,
+        }
+        for i, key in enumerate(groq_keys)
+    ]
+
+    # Append local Ollama as final fallback
+    providers.append({
+        "name": "ollama",
+        "api_url": None,
+        "api_key": "",
+        "model": "qwen2.5:7b",
+        "judge_model": "qwen2.5:7b",
+    })
+
+    return providers
+
+
+async def _cloud_chat(
+    messages: list[dict],
+    model: str,
+    temperature: float,
+    json_mode: bool = False,
+    provider: dict | None = None,
+) -> str:
+    """Call an OpenAI-compatible cloud API for one provider."""
+    cfg = provider or _llm_cfg()
+    base_url = cfg.get("api_url", "https://api.groq.com/openai/v1")
+    api_key = cfg.get("api_key", "")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    client = _get_client()
+    resp = await client.post(
+        f"{base_url}/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+async def _chat_with_fallback(
+    messages: list[dict],
+    temperature: float,
+    json_mode: bool,
+    use_judge: bool = False,
+    format_schema: dict | None = None,
+    seed: int | None = None,
+) -> str:
+    """Try each provider in order, falling back on rate limit (429) or error."""
+    if _get_backend() == "ollama":
+        # Local-only mode — skip cloud entirely
+        url = f"{_get_ollama_url()}/api/chat"
+        model = _get_judge_model() if use_judge else _get_model()
+        payload: dict[str, Any] = {
+            "model": model, "messages": messages,
+            "stream": False, "options": {"temperature": temperature},
+        }
+        if format_schema:
+            payload["format"] = format_schema
+        if seed is not None:
+            payload["options"]["seed"] = seed
+        data = await _ollama_request(url, payload)
+        return data["message"]["content"]
+
+    providers = _get_providers()
+    last_error: Exception | None = None
+
+    for p in providers:
+        if p.get("api_url") is None:
+            # Ollama local fallback
+            try:
+                url = f"{_get_ollama_url()}/api/chat"
+                model = p["judge_model"] if use_judge else p["model"]
+                payload = {
+                    "model": model, "messages": messages,
+                    "stream": False, "options": {"temperature": temperature},
+                }
+                if format_schema:
+                    payload["format"] = format_schema
+                if seed is not None:
+                    payload["options"]["seed"] = seed
+                data = await _ollama_request(url, payload)
+                logger.info("Fell back to local Ollama (%s)", model)
+                return data["message"]["content"]
+            except Exception as e:
+                last_error = e
+                continue
+
+        model = p["judge_model"] if use_judge else p["model"]
+        try:
+            result = await _cloud_chat(messages, model, temperature, json_mode, provider=p)
+            if p != _get_providers()[0]:
+                logger.info("Using fallback provider '%s' (model: %s)", p.get("name"), model)
+            return result
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("Rate limit hit on provider '%s', trying next...", p.get("name"))
+                last_error = e
+                continue
+            raise
+        except Exception as e:
+            logger.warning("Provider '%s' failed: %s, trying next...", p.get("name"), e)
+            last_error = e
+            continue
+
+    raise RuntimeError(f"All providers failed. Last error: {last_error}")
 
 
 async def _ollama_request(url: str, payload: dict, retries: int = 2) -> dict:
-    """Make a request to Ollama with retry logic and connection pooling."""
+    """Make a request to Ollama with retry logic."""
     for attempt in range(retries + 1):
         try:
             client = _get_client()
@@ -81,54 +251,36 @@ async def _ollama_request(url: str, payload: dict, retries: int = 2) -> dict:
                 raise
 
 
-async def _ollama_generate(
-    prompt: str,
-    system: str = "",
-    temperature: float = 0.7,
-    format_schema: dict | None = None,
-    seed: int | None = None,
-    model: str | None = None,
-) -> str:
-    """Call Ollama API for text generation."""
-    url = f"{_get_ollama_url()}/api/generate"
-    payload: dict[str, Any] = {
-        "model": model or _get_model(),
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": temperature},
-    }
-    if system:
-        payload["system"] = system
-    if format_schema:
-        payload["format"] = format_schema
-    if seed is not None:
-        payload["options"]["seed"] = seed
-
-    data = await _ollama_request(url, payload)
-    return data["response"]
-
-
 async def _ollama_chat(
     messages: list[dict],
     temperature: float = 0.7,
     format_schema: dict | None = None,
     seed: int | None = None,
 ) -> str:
-    """Call Ollama chat API."""
-    url = f"{_get_ollama_url()}/api/chat"
-    payload: dict[str, Any] = {
-        "model": _get_model(),
-        "messages": messages,
-        "stream": False,
-        "options": {"temperature": temperature},
-    }
-    if format_schema:
-        payload["format"] = format_schema
-    if seed is not None:
-        payload["options"]["seed"] = seed
+    """Generation calls — tries providers in order, falls back on rate limit."""
+    return await _chat_with_fallback(
+        messages, temperature,
+        json_mode=format_schema is not None,
+        use_judge=False,
+        format_schema=format_schema,
+        seed=seed,
+    )
 
-    data = await _ollama_request(url, payload)
-    return data["message"]["content"]
+
+async def _judge_chat(
+    messages: list[dict],
+    temperature: float = 0.2,
+    format_schema: dict | None = None,
+) -> str:
+    """Evaluation/judging calls — uses judge model, tries providers in order."""
+    return await _chat_with_fallback(
+        messages, temperature,
+        json_mode=format_schema is not None,
+        use_judge=True,
+        format_schema=format_schema,
+    )
+
+
 
 
 @mcp_server.tool()
@@ -287,18 +439,16 @@ Items to judge:
 
 Return a JSON object with a "results" array. Each result has: index (1-based), is_relevant (true if score >= 7), score (0-10), reason (brief)."""
 
-    raw = await _ollama_generate(
-        prompt=prompt,
-        temperature=0.3,
-        format_schema=schema,
-        model=_get_judge_model(),
-    )
+    messages = [
+        {"role": "system", "content": "You are an AI content relevance judge. Respond with valid JSON only."},
+        {"role": "user", "content": prompt},
+    ]
+    raw = await _judge_chat(messages=messages, temperature=0.3, format_schema=schema)
 
     try:
         data = json.loads(raw)
         return data
     except json.JSONDecodeError:
-        # Fallback: mark all as relevant
         return {
             "results": [
                 {"index": i + 1, "is_relevant": True, "score": 7.0, "reason": "parse_fallback"}

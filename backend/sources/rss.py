@@ -124,7 +124,7 @@ class RSSSource(BaseSource):
             execute(
                 """UPDATE sources SET
                     last_error = ?,
-                    last_error_at = now(),
+                    last_error_at = datetime('now'),
                     consecutive_failures = COALESCE(consecutive_failures, 0) + 1
                 WHERE id = ?""",
                 [error_msg[:500], source_id],

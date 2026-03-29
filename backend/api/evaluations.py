@@ -61,6 +61,82 @@ def get_common_issues(last_n_runs: int = 5):
     return get_recent_issues(last_n_runs)
 
 
+@router.get("/metrics/summary")
+def get_metrics_summary():
+    """Get overall per-metric averages and per-run metric averages from detailed_evaluations."""
+    # Overall averages
+    overall_row = fetch_one("""
+        SELECT
+            COUNT(*) as total,
+            AVG(overall_score) as overall,
+            AVG(answer_relevancy) as answer_relevancy,
+            AVG(faithfulness) as faithfulness,
+            AVG(hallucination) as hallucination,
+            AVG(bias) as bias,
+            AVG(toxicity) as toxicity,
+            AVG(linkedin_quality) as linkedin_quality
+        FROM detailed_evaluations
+    """)
+    overall = {
+        "total": 0,
+        "overall": 0.0,
+        "answer_relevancy": 0.0,
+        "faithfulness": 0.0,
+        "hallucination": 0.0,
+        "bias": 0.0,
+        "toxicity": 0.0,
+        "linkedin_quality": 0.0,
+    }
+    if overall_row:
+        keys = list(overall.keys())
+        for i, k in enumerate(keys):
+            overall[k] = overall_row[i] or 0.0
+
+    # Per-run averages (join detailed_evaluations with pipeline_runs)
+    run_rows = fetch_all("""
+        SELECT
+            de.pipeline_run_id,
+            pr.started_at,
+            COUNT(*) as eval_count,
+            AVG(de.overall_score) as overall,
+            AVG(de.answer_relevancy) as answer_relevancy,
+            AVG(de.faithfulness) as faithfulness,
+            AVG(de.hallucination) as hallucination,
+            AVG(de.bias) as bias,
+            AVG(de.toxicity) as toxicity,
+            AVG(de.linkedin_quality) as linkedin_quality
+        FROM detailed_evaluations de
+        LEFT JOIN pipeline_runs pr ON de.pipeline_run_id = pr.id
+        WHERE de.pipeline_run_id != ''
+        GROUP BY de.pipeline_run_id, pr.started_at
+        ORDER BY pr.started_at ASC
+        LIMIT 30
+    """)
+    per_run = []
+    run_cols = ["pipeline_run_id", "started_at", "eval_count", "overall",
+                "answer_relevancy", "faithfulness", "hallucination",
+                "bias", "toxicity", "linkedin_quality"]
+    for row in run_rows:
+        r = dict(zip(run_cols, row))
+        if r.get("started_at"):
+            r["started_at"] = str(r["started_at"])
+        per_run.append(r)
+
+    return {"overall": overall, "per_run": per_run}
+
+
+@router.get("/thresholds")
+def get_thresholds():
+    """Return the active evaluation thresholds and weights from config."""
+    from backend.config import ConfigManager
+    ev2 = ConfigManager.evaluation_v2()
+    return {
+        "thresholds": ev2.get("thresholds", {}),
+        "weights": ev2.get("weights", {}),
+        "overall_pass_threshold": ev2.get("overall_pass_threshold", 7.0),
+    }
+
+
 @router.get("/post/{post_id}")
 def get_post_evaluations(post_id: str):
     """Get evaluations for a specific post (v2 detailed + v1 legacy)."""

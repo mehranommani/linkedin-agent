@@ -19,7 +19,7 @@ from backend.sources.base import BaseSource
 logger = logging.getLogger(__name__)
 
 _HEADERS = {"User-Agent": "LinkedInAgent/2.0"}
-_ARXIV_API = "http://export.arxiv.org/api/query"
+_ARXIV_API = "https://export.arxiv.org/api/query"
 
 # ArXiv Atom namespaces
 _NS = {

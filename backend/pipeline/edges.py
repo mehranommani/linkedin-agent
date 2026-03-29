@@ -31,7 +31,8 @@ def quality_gate_decision(state: PipelineState) -> str:
     eval_config = ConfigManager.evaluation_v2()
     thresholds = eval_config.get("thresholds", {})
 
-    fixable_metrics = {"answer_relevancy", "faithfulness", "hallucination", "linkedin_quality"}
+    # All metrics are retryable except toxicity (cannot be fixed by rephrasing alone)
+    fixable_metrics = {"answer_relevancy", "faithfulness", "hallucination", "linkedin_quality", "bias"}
     non_fixable_failures = []
 
     for metric, threshold in thresholds.items():
@@ -39,7 +40,7 @@ def quality_gate_decision(state: PipelineState) -> str:
         if score < threshold and metric not in fixable_metrics:
             non_fixable_failures.append(metric)
 
-    # Don't retry if failure is in non-fixable metrics (bias, toxicity)
+    # Only toxicity failures are truly non-fixable — reject immediately
     if non_fixable_failures:
         return "reject"
 

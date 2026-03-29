@@ -1,7 +1,10 @@
 """
-Papers with Code Source
-=======================
-Fetches trending papers from the Papers with Code public API.
+Papers Source
+=============
+Fetches trending AI papers from the HuggingFace Daily Papers API.
+Papers with Code API was deprecated and now redirects to HuggingFace.
+
+API docs: https://huggingface.co/api/daily_papers
 """
 from __future__ import annotations
 
@@ -20,16 +23,16 @@ _HEADERS = {
     "User-Agent": "LinkedInAgent/2.0",
     "Accept": "application/json",
 }
-_API_BASE = "https://paperswithcode.com/api/v1/papers/"
+_HF_DAILY_PAPERS = "https://huggingface.co/api/daily_papers"
 
 
 class PapersWithCodeSource(BaseSource):
-    """Trending papers from Papers with Code."""
+    """Trending AI papers from HuggingFace Daily Papers."""
 
     source_type: str = "papers"
 
     async def fetch(self, params: dict, limit: int = 15) -> list[ContentItem]:
-        """Fetch papers from Papers with Code.
+        """Fetch today's trending papers from HuggingFace.
 
         ``params`` keys
         ---------------
@@ -37,56 +40,47 @@ class PapersWithCodeSource(BaseSource):
         """
         effective_limit: int = params.get("limit", limit)
 
-        query_params = {
-            "ordering": "-proceeding",
-            "items_per_page": effective_limit * 2,  # over-fetch to filter blanks
-        }
-
         try:
             async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
-                resp = await client.get(_API_BASE, params=query_params)
+                resp = await client.get(_HF_DAILY_PAPERS)
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
             logger.error("PapersWithCodeSource.fetch failed: %s", exc)
             return []
 
-        results = data.get("results", [])
         items: list[ContentItem] = []
 
-        for paper in results:
+        for entry in data[:effective_limit * 2]:
             try:
+                paper = entry.get("paper", {})
+
                 title = paper.get("title", "").strip()
                 if not title:
                     continue
 
                 paper_id = paper.get("id", "")
-                url_slug = paper.get("url_slug", "") or paper_id
-                paper_url = paper.get("paper_url", "")
-                if not paper_url:
-                    paper_url = f"https://paperswithcode.com/paper/{url_slug}" if url_slug else ""
-                if not paper_url:
+                if not paper_id:
                     continue
 
-                abstract = paper.get("abstract", "").strip()
+                paper_url = f"https://huggingface.co/papers/{paper_id}"
+
+                abstract = paper.get("summary", "") or paper.get("ai_summary", "")
+                abstract = abstract.strip()
                 if not abstract:
                     abstract = title
 
-                # published date
-                pub_date = paper.get("published", "")
-                ts = self._parse_date(pub_date)
+                pub_str = paper.get("publishedAt", "")
+                ts = self._parse_date(pub_str)
 
-                # authors
                 authors = paper.get("authors", []) or []
-                author_names = []
-                for a in authors[:5]:
-                    if isinstance(a, str):
-                        author_names.append(a)
-                    elif isinstance(a, dict):
-                        author_names.append(a.get("name", ""))
+                author_names = [
+                    a.get("name", "") for a in authors[:5]
+                    if isinstance(a, dict) and a.get("name")
+                ]
 
-                # conference / proceeding
-                proceeding = paper.get("proceeding", "") or ""
+                upvotes = paper.get("upvotes", 0)
+                github_repo = paper.get("githubRepo", "")
 
                 items.append(
                     ContentItem(
@@ -96,7 +90,8 @@ class PapersWithCodeSource(BaseSource):
                         summary=abstract[:600],
                         metrics={
                             "authors": author_names,
-                            "proceeding": proceeding,
+                            "upvotes": upvotes,
+                            "github_repo": github_repo or "",
                         },
                         timestamp=ts,
                     )
@@ -111,10 +106,10 @@ class PapersWithCodeSource(BaseSource):
 
     @staticmethod
     def _parse_date(s: str) -> float:
-        """Parse a date string from the PwC API into a Unix timestamp."""
+        """Parse an ISO-8601 date string from the HuggingFace API."""
         if not s:
             return time.time()
-        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
             try:
                 dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
                 return dt.timestamp()

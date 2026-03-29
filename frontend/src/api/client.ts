@@ -113,7 +113,7 @@ export interface PipelineRunConfig {
   max_age_days?: number;
   max_retries?: number;
   limit_per_source?: number;
-  sources?: number[];
+  sources?: string[];
 }
 
 export interface PipelineRun {
@@ -259,6 +259,16 @@ export async function getPipelineRuns(): Promise<PipelineRun[]> {
   return data.runs;
 }
 
+export async function getRunningPipeline(): Promise<{ running: boolean; run_id: string | null }> {
+  const { data } = await api.get("/agent/running");
+  return data;
+}
+
+export async function cancelPipeline(): Promise<{ cancelled: boolean }> {
+  const { data } = await api.post("/agent/cancel");
+  return data;
+}
+
 /* ---------- MCP ---------- */
 
 export async function getMcpTools(): Promise<McpTool[]> {
@@ -266,7 +276,45 @@ export async function getMcpTools(): Promise<McpTool[]> {
   return data.tools;
 }
 
+export interface MetricAverages {
+  total: number;
+  overall: number;
+  answer_relevancy: number;
+  faithfulness: number;
+  hallucination: number;
+  bias: number;
+  toxicity: number;
+  linkedin_quality: number;
+}
+
+export interface PerRunMetrics extends MetricAverages {
+  pipeline_run_id: string;
+  started_at: string;
+  eval_count: number;
+}
+
+export interface MetricsSummary {
+  overall: MetricAverages;
+  per_run: PerRunMetrics[];
+}
+
 /* ---------- Evaluations (v2) ---------- */
+
+export async function getMetricsSummary(): Promise<MetricsSummary> {
+  const { data } = await api.get("/evaluations/metrics/summary");
+  return data;
+}
+
+export interface EvaluationThresholds {
+  thresholds: Record<string, number>;
+  weights: Record<string, number>;
+  overall_pass_threshold: number;
+}
+
+export async function getEvaluationThresholds(): Promise<EvaluationThresholds> {
+  const { data } = await api.get("/evaluations/thresholds");
+  return data;
+}
 
 export async function getPostEvaluation(postId: string): Promise<DetailedEvaluation | null> {
   try {

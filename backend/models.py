@@ -116,8 +116,10 @@ class LinkedInPost(BaseModel):
     @property
     def full_text(self) -> str:
         """Assemble the complete LinkedIn post."""
-        tags = " ".join(f"#{t.lstrip('#')}" for t in self.hashtags)
-        return f"{self.hook}\n\n{self.body}\n\n{self.takeaway}\n\n{self.url}\n\n{tags}"
+        tags = " ".join(f"#{t.lstrip('#')}" for t in self.hashtags[:6])
+        # Strip leading whitespace from each paragraph (LLM sometimes indents body paragraphs)
+        clean_body = "\n\n".join(p.strip() for p in self.body.split("\n\n") if p.strip())
+        return f"{self.hook}\n\n{clean_body}\n\n{self.takeaway}\n\n{self.url}\n\n{tags}"
 
 
 # --- Evaluation ---

@@ -3,7 +3,7 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
 } from "recharts";
-import { getPostEvaluation, type DetailedEvaluation } from "../api/client";
+import { getPostEvaluation, getEvaluationThresholds, type DetailedEvaluation } from "../api/client";
 
 const METRIC_LABELS: Record<string, string> = {
   answer_relevancy: "Relevancy",
@@ -14,17 +14,21 @@ const METRIC_LABELS: Record<string, string> = {
   linkedin_quality: "LinkedIn Quality",
 };
 
-const THRESHOLDS: Record<string, number> = {
+// Default thresholds — overridden by live values fetched from backend config
+const DEFAULT_THRESHOLDS: Record<string, number> = {
   answer_relevancy: 7.0,
   faithfulness: 7.0,
   hallucination: 8.0,
-  bias: 7.0,
+  bias: 5.5,
   toxicity: 9.0,
   linkedin_quality: 7.0,
 };
 
-function MetricBadge({ name, score }: { name: string; score: number }) {
-  const threshold = THRESHOLDS[name] ?? 7.0;
+// Module-level cache so all card instances share the same fetch
+let _cachedThresholds: Record<string, number> | null = null;
+
+function MetricBadge({ name, score, thresholds }: { name: string; score: number; thresholds: Record<string, number> }) {
+  const threshold = thresholds[name] ?? DEFAULT_THRESHOLDS[name] ?? 7.0;
   const passed = score >= threshold;
   return (
     <div
@@ -54,6 +58,15 @@ export default function EvaluationReport({ postId, evaluation: evalProp }: Evalu
     enabled: !evalProp && !!postId,
   });
 
+  const { data: thresholdsData } = useQuery({
+    queryKey: ["evaluationThresholds"],
+    queryFn: getEvaluationThresholds,
+    staleTime: 5 * 60 * 1000, // cache for 5 min — config rarely changes
+  });
+
+  const thresholds = thresholdsData?.thresholds ?? DEFAULT_THRESHOLDS;
+  if (thresholdsData) _cachedThresholds = thresholdsData.thresholds;
+
   const evaluation = evalProp ?? evalData;
 
   if (!evaluation) {
@@ -72,7 +85,7 @@ export default function EvaluationReport({ postId, evaluation: evalProp }: Evalu
   const radarData = metrics.map((m) => ({
     metric: METRIC_LABELS[m] ?? m,
     score: (evaluation as unknown as Record<string, number>)[m] ?? 0,
-    threshold: THRESHOLDS[m] ?? 7.0,
+    threshold: thresholds[m] ?? DEFAULT_THRESHOLDS[m] ?? 7.0,
     fullMark: 10,
   }));
 
@@ -121,6 +134,7 @@ export default function EvaluationReport({ postId, evaluation: evalProp }: Evalu
             key={m}
             name={m}
             score={(evaluation as unknown as Record<string, number>)[m] ?? 0}
+            thresholds={thresholds}
           />
         ))}
       </div>
@@ -186,5 +200,8 @@ export default function EvaluationReport({ postId, evaluation: evalProp }: Evalu
     </div>
   );
 }
+
+// THRESHOLDS export kept for Evaluations.tsx — returns live values if fetched, else defaults
+const THRESHOLDS: Record<string, number> = _cachedThresholds ?? DEFAULT_THRESHOLDS;
 
 export { MetricBadge, METRIC_LABELS, THRESHOLDS };

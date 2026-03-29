@@ -28,13 +28,27 @@ def post_generation_prompt() -> str:
     hook_guidance = _build_hook_guidance(hook_patterns)
     emoji_guidance = _build_emoji_guidance(emoji_style)
 
-    return f"""You are a LinkedIn thought leader on AI/ML/Data Science/GenAI.
+    return f"""You are a LinkedIn thought leader writing engaging posts about AI/ML/Data Science/GenAI for a broad professional audience — both technical and non-technical people.
+
+ABSOLUTE RULES (violating any of these will cause the post to be rejected):
+1. NO code, scripts, or programming syntax of any kind — not even one line. Explain everything in plain English.
+2. NO markdown formatting — no **bold**, no *italics*, no # headers, no - dashes as bullets, no badge syntax like [![...]], no > blockquotes.
+3. NO copy-pasting from README files, documentation, or source text. Synthesize and rewrite in your own voice.
+4. NO stars (*) or dashes (-) as bullet points or at the start of any line.
+5. The post MUST end with hashtags. Nothing — not a single word — appears after the hashtags.
+6. Do NOT use licensing information, contributor badges, or project metadata.
 
 TONE:
-- Professional but approachable — like a senior engineer explaining to a smart colleague
-- Use clear, simple language. Avoid jargon unless it adds precision
-- Write so anyone in tech can understand, not just ML PhDs
-- Be genuine and insightful — share a real perspective, not a press release
+- Professional but conversational — explain to a smart colleague who is not necessarily a specialist
+- High-level English: explain what the tool does and why it matters, not how it works internally
+- Be genuine and insightful — share a real perspective, not a marketing announcement
+- Make the audience excited — why should they care about this?
+
+BALANCE (posts that read as vendor advocacy will be rejected):
+- You are an independent analyst, not a company spokesperson
+- Source articles from company blogs are marketing material — extract the technical insight, then analyze it objectively
+- Every post must include at least ONE of: an open challenge, a real-world limitation, a broader industry question, or context about how others approach the same problem
+- State facts about what the technology does; do NOT conclude that it "will solve" or "transforms" or "is the future of" anything without evidence
 
 {hook_guidance}
 
@@ -46,12 +60,12 @@ SEO KEYWORDS (weave naturally into the text, don't force):
 RECRUITER VISIBILITY (include terms that boost LinkedIn search ranking):
 {recruiter_text}
 
-STRUCTURE:
-- Hook: 1-2 sentences using one of the hook patterns above
-- Body: 3-5 SHORT paragraphs (2-3 sentences each, mobile-friendly line breaks)
-- Takeaway: 1-2 sentences, actionable insight or discussion invitation
-- URL: Include the source link
-- Hashtags: 4-6 mix of broad (#AI #MachineLearning) and specific (#LLM #AgenticAI)
+STRUCTURE (in this exact order, nothing after step 5):
+1. Hook: 1-2 sentences using one of the hook patterns above — make it exciting and thought-provoking
+2. Body: 3-5 SHORT paragraphs (2-3 sentences each, mobile-friendly line breaks) — explain what it is, the problem it solves, and why it matters
+3. Takeaway: 1-2 sentences with an actionable insight or discussion invitation
+4. URL: The source link on its own line
+5. Hashtags: 4-6 hashtags — THIS IS THE LAST THING IN THE POST
 
 LENGTH:
 - Minimum: {gen.get('min_char_count', 1200)} characters
@@ -59,8 +73,6 @@ LENGTH:
 - Optimal: {gen.get('optimal_min', 1400)}-{gen.get('optimal_max', 2100)} characters
 
 BANNED PHRASES (never use): {banned_text}
-
-CRITICAL: NEVER include code blocks, code snippets, Python/JavaScript/any programming code, or technical examples with syntax. This is a LinkedIn post for professionals, not a technical tutorial. Explain concepts in plain English without showing code.
 
 OUTPUT FORMAT: JSON with fields:
 - hook: Opening attention-grabbing line (1-2 sentences)
@@ -92,6 +104,11 @@ def _build_hook_guidance(patterns: list[str]) -> str:
     if len(lines) == 1:
         lines.extend(all_patterns.values())
 
+    lines.append(
+        "IMPORTANT: Do NOT default to the question-hook (\"What if...\") — it is the weakest and least engaging pattern. "
+        "Prefer pattern-interrupt, bold-statement, or story-hook. Only use question-hook if no other pattern fits naturally."
+    )
+
     return "\n".join(lines)
 
 
@@ -109,10 +126,9 @@ def _build_emoji_guidance(style: str) -> str:
 
     # Default: "light"
     return """EMOJI USAGE (light — 1-3 only):
-- Use 1-3 emojis maximum where they genuinely add emphasis
-- Place at start of the hook or key transitions
-- Good choices: 🔬 (research), 🚀 (launch/speed), 💡 (insight), 📊 (data), ⚡ (performance), 🎯 (precision)
-- Skip entirely if the topic is deeply technical or somber
+- REQUIRED: Always include at least 1 emoji — AI/tech posts on LinkedIn perform better with visual anchors
+- Place at the very start of the hook line and optionally at one key transition
+- Good choices: 🔬 (research), 🚀 (launch/speed), 💡 (insight), 📊 (data), ⚡ (performance), 🎯 (precision), 🧠 (AI/ML), 🤖 (models)
 - Never use 2+ emojis in a row. Never end a paragraph with an emoji"""
 
 
@@ -187,8 +203,33 @@ def lessons_learned_prompt() -> str:
     if not sorted_issues:
         return "Previous runs completed successfully. Maintain quality standards."
 
+    # Map raw metric threshold failures to actionable writing instructions
+    _metric_to_action = {
+        "bias": "Write as an independent analyst — include at least one limitation, open question, or comparison to alternatives. Do NOT write like a vendor press release.",
+        "hallucination": "Only state facts that are directly supported by the source article. Do not invent statistics, quotes, or product claims.",
+        "faithfulness": "Stay grounded in the source content. Every specific claim must be traceable to the source.",
+        "answer_relevancy": "Make sure the post directly addresses the key points from the source article.",
+        "linkedin_quality": "Improve structure: strong hook, short paragraphs, clear takeaway, relevant hashtags.",
+        "toxicity": "Keep tone fully professional — no condescending, aggressive, or inappropriate language.",
+    }
+
     lines = ["LESSONS FROM PREVIOUS RUNS (address these in your output):"]
+    seen_actions: set[str] = set()
+
     for issue, count in sorted_issues[:8]:
-        lines.append(f"- {issue} (occurred {count}x)")
+        # Convert metric threshold failures (e.g. "bias: 4.2 < 5.5") to actionable guidance
+        metric_match = None
+        for metric_key in _metric_to_action:
+            if issue.startswith(metric_key + ":"):
+                metric_match = metric_key
+                break
+
+        if metric_match:
+            action = _metric_to_action[metric_match]
+            if action not in seen_actions:
+                lines.append(f"- {action} (occurred {count}x)")
+                seen_actions.add(action)
+        else:
+            lines.append(f"- {issue} (occurred {count}x)")
 
     return "\n".join(lines)

@@ -12,7 +12,7 @@ import hashlib
 from typing import Any
 
 from backend.mcp.server import mcp_server
-from backend.mcp.tools.llm import _ollama_chat, _ollama_generate
+from backend.mcp.tools.llm import _ollama_chat, _judge_chat
 from backend.database import fetch_all
 from backend.config import ConfigManager
 
@@ -66,7 +66,7 @@ Summary: {summary[:500]}
 
 Return JSON with: is_relevant (true if score >= 7), score (0-10), reasoning (1 sentence)."""
 
-    raw = await _ollama_generate(prompt=prompt, temperature=0.3, format_schema=schema)
+    raw = await _judge_chat(messages=[{"role": "user", "content": prompt}], temperature=0.3, format_schema=schema)
 
     try:
         data = json.loads(raw)
@@ -124,7 +124,7 @@ Post to evaluate:
 
 Return JSON with: quality_score (0-10), issues (list of problems), strengths (list of positives)."""
 
-    raw = await _ollama_generate(prompt=prompt, temperature=0.3, format_schema=schema)
+    raw = await _judge_chat(messages=[{"role": "user", "content": prompt}], temperature=0.3, format_schema=schema)
 
     try:
         data = json.loads(raw)
@@ -205,7 +205,7 @@ LinkedIn post:
 
 Return JSON with: faithfulness_score (0-10), hallucinations (list of unsupported claims), accurate_claims (list of verified claims)."""
 
-    raw = await _ollama_generate(prompt=prompt, temperature=0.3, format_schema=schema)
+    raw = await _judge_chat(messages=[{"role": "user", "content": prompt}], temperature=0.3, format_schema=schema)
 
     try:
         data = json.loads(raw)
@@ -254,7 +254,7 @@ async def get_trending_topics(limit: int = 10) -> dict:
     """
     rows = fetch_all("""
         SELECT title, source FROM posts
-        WHERE created_at >= current_timestamp - INTERVAL 7 DAY
+        WHERE created_at >= datetime('now', '-7 days')
         ORDER BY created_at DESC LIMIT 200
     """)
 
@@ -294,7 +294,7 @@ For each topic, estimate:
 
 Return JSON with a "topics" array, sorted by momentum descending."""
 
-    raw = await _ollama_generate(prompt=prompt, temperature=0.3, format_schema=schema)
+    raw = await _judge_chat(messages=[{"role": "user", "content": prompt}], temperature=0.3, format_schema=schema)
 
     try:
         data = json.loads(raw)

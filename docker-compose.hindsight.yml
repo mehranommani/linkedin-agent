@@ -7,7 +7,7 @@ services:
     environment:
       # LLM: Use local Ollama on host machine
       - HINDSIGHT_API_LLM_PROVIDER=ollama
-      - HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:11434
+      - HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:11434/v1
       - HINDSIGHT_API_LLM_MODEL=qwen2.5:7b
       - HINDSIGHT_API_LLM_API_KEY=not-needed
       - HINDSIGHT_API_LLM_TIMEOUT=180
@@ -22,7 +22,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - hindsight-data:/home/hindsight/.pg0
+      - ./data/hindsight:/home/hindsight/.pg0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
@@ -30,6 +30,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-
-volumes:
-  hindsight-data:

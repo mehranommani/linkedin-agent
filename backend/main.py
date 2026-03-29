@@ -32,19 +32,20 @@ logging.getLogger("mcp").setLevel(logging.WARNING)
 
 
 async def _stale_run_cleanup_loop():
-    """Every 5 minutes mark pipeline runs stuck in 'running' for >30 min as 'failed'."""
+    """Every 10 minutes mark pipeline runs stuck in 'running' for >3 hours as 'failed'.
+    3h covers heavy runs: 15 posts × 3 retries × ~6 min/post (generate + 4-parallel eval)."""
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(600)
         try:
             count = fetch_one(
                 "SELECT COUNT(*) FROM pipeline_runs WHERE status = 'running'"
-                " AND completed_at IS NULL AND started_at < datetime('now', '-30 minutes')"
+                " AND completed_at IS NULL AND started_at < datetime('now', '-180 minutes')"
             )[0]
             if count:
                 execute(
                     "UPDATE pipeline_runs SET status = 'failed', completed_at = datetime('now')"
                     " WHERE status = 'running' AND completed_at IS NULL"
-                    " AND started_at < datetime('now', '-30 minutes')"
+                    " AND started_at < datetime('now', '-180 minutes')"
                 )
                 logging.getLogger(__name__).warning("Marked %d stale pipeline run(s) as failed", count)
         except Exception as e:

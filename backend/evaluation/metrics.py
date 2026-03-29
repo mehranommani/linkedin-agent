@@ -20,7 +20,7 @@ import logging
 import re
 from typing import Any
 
-from backend.mcp.tools.llm import _ollama_chat
+from backend.mcp.tools.llm import _judge_chat as _ollama_chat
 from backend.config import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -307,6 +307,36 @@ def check_programmatic_guardrails(post_text: str) -> dict[str, Any]:  # noqa: C9
     # URL check
     if "http" not in post_text:
         issues.append("Missing source URL")
+
+    # Code / script check
+    code_patterns = ["```", "def ", "import ", "class ", "print(", "return ", "```python", "```js"]
+    found_code = [p for p in code_patterns if p in post_text]
+    if found_code:
+        issues.append("Post contains code or programming syntax — rewrite in plain English without any code")
+
+    # Markdown formatting check
+    import re as _re
+    badge_pattern = _re.search(r'\[!\[', post_text)
+    if badge_pattern:
+        issues.append("Post contains markdown badge syntax ([![...]) — remove all markdown formatting")
+    markdown_patterns = ["**", "__", "~~"]
+    found_md = [p for p in markdown_patterns if p in post_text]
+    if found_md:
+        issues.append(f"Post contains markdown formatting ({', '.join(found_md)}) — use plain text only")
+
+    # No text after hashtags check
+    hashtag_positions = [m.start() for m in re.finditer(r'(?<!\w)#[A-Za-z]\w*', post_text)]
+    if hashtag_positions:
+        last_hashtag_end = max(m.end() for m in re.finditer(r'(?<!\w)#[A-Za-z]\w*', post_text))
+        text_after_hashtags = post_text[last_hashtag_end:].strip()
+        if text_after_hashtags:
+            issues.append("Post has text after hashtags — hashtags must be the very last thing in the post")
+
+    # Star/dash bullets check
+    lines = post_text.split('\n')
+    bullet_lines = [l.strip() for l in lines if l.strip().startswith('* ') or l.strip().startswith('- ')]
+    if bullet_lines:
+        issues.append("Post uses star (*) or dash (-) bullets — use plain paragraphs instead")
 
     return {
         "passed": len(issues) == 0,

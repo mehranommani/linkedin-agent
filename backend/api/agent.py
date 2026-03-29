@@ -105,14 +105,52 @@ def get_pipeline_status(run_id: str):
     }
 
 
-@router.post("/cancel/{run_id}")
-def cancel_pipeline(run_id: str):
-    """Cancel a running pipeline."""
+@router.get("/running")
+def get_running_pipeline():
+    """Return the currently running pipeline run_id, or null if idle.
+
+    Checks both the in-memory task dict AND the DB so it works correctly
+    even after a backend restart.
+    """
+    # Check in-memory tasks first
     for key, task in _running_tasks.items():
         if not task.done():
+            row = fetch_one(
+                "SELECT id FROM pipeline_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            )
+            run_id = row[0] if row else key
+            return {"running": True, "run_id": run_id}
+
+    # Fallback: check DB for a running row (task may have been lost on restart)
+    row = fetch_one(
+        "SELECT id FROM pipeline_runs WHERE status = 'running' AND completed_at IS NULL "
+        "ORDER BY started_at DESC LIMIT 1"
+    )
+    if row:
+        return {"running": True, "run_id": row[0]}
+
+    return {"running": False, "run_id": None}
+
+
+@router.post("/cancel")
+async def cancel_pipeline():
+    """Cancel the currently running pipeline and mark it as cancelled in DB."""
+    from backend.database import execute, fetch_one as _fetch_one
+    # Cancel in-memory task if present
+    for key, task in list(_running_tasks.items()):
+        if not task.done():
             task.cancel()
-            return {"cancelled": True, "run_id": run_id}
-    raise HTTPException(status_code=404, detail="No running pipeline found")
+    # Always mark any running DB rows as cancelled (covers backend-restart case)
+    row = _fetch_one(
+        "SELECT id FROM pipeline_runs WHERE status = 'running' AND completed_at IS NULL LIMIT 1"
+    )
+    if not row and not any(not t.done() for t in _running_tasks.values()):
+        raise HTTPException(status_code=404, detail="No running pipeline found")
+    execute(
+        "UPDATE pipeline_runs SET status = 'cancelled', completed_at = datetime('now') "
+        "WHERE status = 'running' AND completed_at IS NULL"
+    )
+    return {"cancelled": True}
 
 
 @router.get("/runs")

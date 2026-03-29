@@ -16,12 +16,10 @@ Flow:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import uuid
 import logging
 from datetime import datetime
-from typing import Any
 
 from langgraph.graph import StateGraph, END
 
@@ -30,65 +28,19 @@ from backend.pipeline.edges import quality_gate_decision, should_continue
 from backend.config import ConfigManager
 
 # MCP tool functions (called directly, not via MCP protocol in-process)
-from backend.mcp.tools.sources import fetch_source, list_available
+from backend.mcp.tools.sources import fetch_source
 from backend.mcp.tools.database import (
     insert_post, check_url_exists, log_pipeline_run,
-    get_active_sources, get_recent_issues,
+    get_active_sources,
 )
 from backend.mcp.tools.llm import generate_post as llm_generate_post, batch_judge_relevance
-from backend.mcp.tools.evaluator import (
-    check_duplicate as eval_check_duplicate,
-    get_trending_topics,
-)
+from backend.mcp.tools.evaluator import check_duplicate as eval_check_duplicate
 from backend.mcp.resources.prompts import lessons_learned_prompt
 
 logger = logging.getLogger(__name__)
 
 # Deterministic keyword pre-filter — items must match at least one keyword in title+summary
 # to be considered for LLM relevance scoring. Mirrors the original ContentScout filter.
-_AI_KEYWORDS = {
-    # Core AI/ML
-    'ai', 'llm', 'machine learning', 'deep learning', 'neural', 'artificial intelligence',
-    'ml', 'mlops', 'automl', 'tensorflow', 'pytorch', 'keras', 'scikit', 'sklearn',
-    # LLMs & Models
-    'gpt', 'gpt-4', 'gpt4', 'claude', 'anthropic', 'openai', 'gemini', 'bard', 'grok',
-    'llama', 'mistral', 'bloom', 'falcon', 'phi-', 'qwen', 'deepseek',
-    'ollama', 'huggingface', 'transformers', 'tokenizer',
-    # GenAI & Diffusion
-    'generative', 'genai', 'diffusion', 'stable diffusion', 'dalle', 'midjourney',
-    'text-to-image', 'image generation', 'whisper', 'speech-to-text', 'tts',
-    # Agentic AI & RAG
-    'agentic', 'agent', 'multi-agent', 'autonomous agent', 'ai agent',
-    'rag', 'retrieval augmented', 'langchain', 'langgraph', 'langsmith',
-    'llamaindex', 'crewai', 'autogen', 'dify', 'flowise',
-    'mcp', 'model context protocol', 'tool use', 'function calling',
-    # Vector & Embeddings
-    'embedding', 'vector db', 'vector database', 'vectorstore',
-    'pinecone', 'weaviate', 'chroma', 'faiss', 'milvus', 'qdrant', 'lancedb',
-    'semantic search', 'similarity search',
-    # NLP & Text
-    'nlp', 'natural language', 'chatbot', 'conversational', 'copilot',
-    'prompt engineering', 'zero-shot', 'few-shot', 'fine-tun', 'lora', 'qlora',
-    'instruction tuning', 'rlhf', 'dpo',
-    # Data Science
-    'data science', 'datascience', 'pandas', 'numpy', 'jupyter', 'notebook',
-    'analytics', 'data analysis', 'forecasting', 'time series',
-    # Computer Vision
-    'computer vision', 'object detection', 'image classification', 'yolo', 'opencv', 'ocr',
-    # MLOps & Infrastructure
-    'model serving', 'inference', 'vllm', 'quantization', 'gguf', 'ggml',
-    # Research
-    'benchmark', 'leaderboard', 'arxiv', 'research paper',
-}
-
-
-def _matches_ai_keywords(item: dict) -> bool:
-    """Return True if the item's title+summary contains at least one AI keyword."""
-    text = (
-        (item.get("title") or "") + " " + (item.get("summary") or "")
-    ).lower()
-    return any(kw in text for kw in _AI_KEYWORDS)
-
 
 async def _log(state: PipelineState, msg: str) -> list[str]:
     """Append a log message, broadcast via WebSocket if available, and return updated logs."""
@@ -191,6 +143,35 @@ async def filter_and_score_node(state: PipelineState) -> dict:
     # Build lookup by index
     judgment_map = {j.get("index", 0): j for j in judgments}
 
+    # Load existing post titles once for title-similarity dedup
+    from backend.database import fetch_all as _fetch_all
+    from backend.mcp.tools.evaluator import _jaccard_similarity
+    existing_titles = [r[0] for r in _fetch_all("SELECT title FROM posts ORDER BY created_at DESC LIMIT 500") if r[0]]
+
+    def _repo_name(title: str) -> str:
+        """For 'org/repo' style titles (GitHub), return just the repo name portion."""
+        return title.split("/")[-1] if "/" in title else title
+
+    def _is_title_duplicate(candidate: str, existing_list: list[str]) -> bool:
+        """Return True if candidate is semantically too similar to any existing title.
+
+        Uses two strategies:
+        - Exact repo-name match for GitHub 'org/repo' style titles
+        - Trigram Jaccard >= 0.4 for all other titles
+        """
+        candidate_repo = _repo_name(candidate).lower().strip()
+        for existing in existing_list:
+            # Strategy 1: repo-name substring match (catches forks / org renames)
+            existing_repo = _repo_name(existing).lower().strip()
+            if len(candidate_repo) >= 5 and (
+                candidate_repo in existing_repo or existing_repo in candidate_repo
+            ):
+                return True
+            # Strategy 2: trigram Jaccard on full title
+            if _jaccard_similarity(candidate, existing) >= 0.4:
+                return True
+        return False
+
     filtered = []
     skipped_irrelevant = 0
     skipped_existing = 0
@@ -202,13 +183,20 @@ async def filter_and_score_node(state: PipelineState) -> dict:
             skipped_irrelevant += 1
             continue
 
-        # Check if URL already in DB
+        # Check if URL already in DB (exact match)
         url = item.get("url", "")
         if url:
             exists_result = check_url_exists(url)
             if exists_result.get("exists", False):
                 skipped_existing += 1
                 continue
+
+        # Check title similarity against existing posts (catches forks/derivatives)
+        candidate_title = item.get("title", "")
+        if candidate_title and _is_title_duplicate(candidate_title, existing_titles):
+            logger.debug("Skipping '%s' — similar title already posted", candidate_title)
+            skipped_existing += 1
+            continue
 
         item["relevance_score"] = judgment.get("score", 7.0)
         filtered.append(item)
@@ -234,7 +222,6 @@ async def pick_next_item_node(state: PipelineState) -> dict:
     """Pick the next item to process from filtered items."""
     filtered = state.get("filtered_items", [])
     idx = state.get("current_item_index", 0)
-    accepted = state.get("accepted_posts", [])
     logs = state.get("logs", [])
 
     if idx >= len(filtered):
@@ -379,11 +366,14 @@ async def generate_post_node(state: PipelineState) -> dict:
         "quality_score": 0,
         "faithfulness_score": 0,
         "passed_quality_gate": False,
+        "hook_pattern_used": result.get("hook_pattern_used", ""),
+        "seo_keywords_used": result.get("seo_keywords_used", []),
     }
 
+    hook_used = post_data.get("hook_pattern_used") or "unknown"
     logs = await _log(
         {**state, "logs": logs},
-        f"Generated post: {post_data['char_count']} chars (temp={temp})"
+        f"Generated post: {post_data['char_count']} chars (temp={temp}, hook={hook_used})"
     )
 
     return {
@@ -502,6 +492,28 @@ async def save_post_node(state: PipelineState) -> dict:
         evaluation["post_id"] = post_id
         _persist_evaluation(evaluation)
 
+    # Store Experience Fact in Hindsight — teaches the agent what worked
+    if evaluation:
+        try:
+            from backend.memory.hindsight_client import store_generation_experience
+            hook_pattern = post.get("hook_pattern_used", "unknown")
+            await store_generation_experience(
+                post_id=post_id,
+                source=item.get("source", "unknown"),
+                hook_pattern=hook_pattern or "unknown",
+                overall_score=evaluation.get("overall_score", 0.0),
+                metric_scores={
+                    k: evaluation.get(k, 0.0)
+                    for k in ("answer_relevancy", "faithfulness", "hallucination", "bias", "toxicity", "linkedin_quality")
+                },
+                passed=True,
+                attempt_number=state.get("generation_attempts", 1),
+                char_count=len(post.get("post_text", "")),
+                issues=evaluation.get("issues", []),
+            )
+        except Exception as e:
+            logger.debug("Could not store generation experience in Hindsight: %s", e)
+
     accepted = list(state.get("accepted_posts", []))
     accepted.append({
         "post_id": post_id,
@@ -518,9 +530,10 @@ async def save_post_node(state: PipelineState) -> dict:
 
 
 async def reject_post_node(state: PipelineState) -> dict:
-    """Record a rejected item."""
+    """Record a rejected item and store failure experience in Hindsight."""
     item = state.get("current_item", {})
     post = state.get("current_post", {})
+    evaluation = state.get("current_evaluation", {})
     logs = await _log(state, f"Rejecting: {item.get('title', '')[:40]}... (issues: {len(post.get('issues', []))})")
 
     rejected = list(state.get("rejected_items", []))
@@ -530,6 +543,25 @@ async def reject_post_node(state: PipelineState) -> dict:
         "issues": post.get("issues", []),
         "quality_score": post.get("quality_score", 0),
     })
+
+    # Store failure Experience Fact in Hindsight — agents learn from failures too
+    if evaluation:
+        try:
+            from backend.memory.hindsight_client import store_failed_experience
+            await store_failed_experience(
+                source=item.get("source", "unknown"),
+                hook_pattern=post.get("hook_pattern_used", "unknown") or "unknown",
+                overall_score=evaluation.get("overall_score", 0.0),
+                metric_scores={
+                    k: evaluation.get(k, 0.0)
+                    for k in ("answer_relevancy", "faithfulness", "hallucination", "bias", "toxicity", "linkedin_quality")
+                },
+                attempt_number=state.get("generation_attempts", 1),
+                char_count=len(post.get("post_text", "")),
+                issues=evaluation.get("issues", []),
+            )
+        except Exception as e:
+            logger.debug("Could not store failure experience in Hindsight: %s", e)
 
     return {"rejected_items": rejected, "logs": logs, "step": "reject"}
 

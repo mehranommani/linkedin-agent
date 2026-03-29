@@ -26,7 +26,30 @@
       "Bash(DATABASE_PATH=/tmp/test_linkedin.db python3 -c \":*)",
       "Bash(BASE=\"http://localhost:9001\" __NEW_LINE_e0932839267d29cd__ echo \"=== 1. Health ===\" curl -s \"$BASE/health\" __NEW_LINE_e0932839267d29cd__ echo -e \"\\\\n\\\\n=== 2. Sources ===\" curl -s \"$BASE/api/sources\")",
       "Bash(sed -i '' 's/title ILIKE ? OR post_text ILIKE ?/title LIKE ? OR post_text LIKE ?/g' backend/mcp/tools/database.py backend/db/queries.py)",
-      "Bash(sed -i '' 's/is_active = TRUE/is_active = 1/g' backend/mcp/tools/database.py backend/db/queries.py)"
+      "Bash(sed -i '' 's/is_active = TRUE/is_active = 1/g' backend/mcp/tools/database.py backend/db/queries.py)",
+      "Bash(sqlite3 data/linkedin_agent.db \"SELECT p.title, p.source_type, hf.rating, hf.comment FROM human_feedback hf JOIN posts p ON hf.post_id = p.id ORDER BY hf.created_at DESC LIMIT 10;\")",
+      "Bash(sqlite3 data/linkedin_agent.db \".schema posts\")",
+      "Bash(sqlite3 data/linkedin_agent.db \"SELECT p.title, p.source, hf.rating, hf.comment FROM human_feedback hf JOIN posts p ON hf.post_id = p.id ORDER BY hf.created_at DESC LIMIT 10;\")",
+      "Bash(sqlite3 data/linkedin_agent.db \".schema human_feedback\")",
+      "Bash(sqlite3 data/linkedin_agent.db \"SELECT p.title, p.source, hf.rating, hf.text_feedback FROM human_feedback hf JOIN posts p ON hf.post_id = p.id ORDER BY hf.created_at DESC LIMIT 10;\")",
+      "Bash(docker compose:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(docker port:*)",
+      "Bash(docker exec:*)",
+      "Bash(PYTHONPATH=. python scripts/seed_hindsight.py)",
+      "Bash(PYTHONPATH=. python -m pytest tests/test_llm_routing.py -v)",
+      "Bash(PYTHONPATH=. python -c \"from backend.config import ConfigManager; import json; print\\(json.dumps\\(ConfigManager.banned_phrases\\(\\), indent=2\\)\\)\")",
+      "Bash(PYTHONPATH=. python -c \":*)",
+      "Bash(sed -n '190,205p' /Users/mehran/Documents/GitHub/linkedin-agent/backend/pipeline/graph.py)",
+      "Bash(sed -n '270,280p' /Users/mehran/Documents/GitHub/linkedin-agent/backend/pipeline/graph.py)",
+      "Bash(docker volume:*)",
+      "Bash(docker system:*)",
+      "Bash(ls /Users/mehran/Documents/GitHub/linkedin-agent/docker-compose*.yml)",
+      "WebFetch(domain:docs.hindsight.vectorize.io)",
+      "Bash(npx tsc:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(PYTHONPATH=/Users/mehran/Documents/GitHub/linkedin-agent python3 -c \":*)",
+      "Bash(echo $GROQ_API_KEY)"
     ]
   }
 }

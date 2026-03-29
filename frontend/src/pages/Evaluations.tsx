@@ -7,15 +7,40 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  RadarChart,
+  Radar,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
 } from "recharts";
-import { getPipelineRuns, type PipelineRun } from "../api/client";
+import { getPipelineRuns, getMetricsSummary, getEvaluationThresholds, type PipelineRun } from "../api/client";
 import PipelineStatus from "../components/PipelineStatus";
+import { MetricBadge, METRIC_LABELS, THRESHOLDS } from "../components/EvaluationReport";
+
+const METRIC_COLORS: Record<string, string> = {
+  answer_relevancy: "#3b82f6",
+  faithfulness: "#8b5cf6",
+  hallucination: "#06b6d4",
+  bias: "#f59e0b",
+  toxicity: "#ef4444",
+  linkedin_quality: "#22c55e",
+};
 
 export default function Evaluations() {
   const { data: runs, isLoading } = useQuery({
     queryKey: ["pipelineRuns"],
     queryFn: getPipelineRuns,
   });
+  const { data: metricsSummary } = useQuery({
+    queryKey: ["metricsSummary"],
+    queryFn: getMetricsSummary,
+  });
+  const { data: thresholdsData } = useQuery({
+    queryKey: ["evaluationThresholds"],
+    queryFn: getEvaluationThresholds,
+    staleTime: 5 * 60 * 1000,
+  });
+  const liveThresholds = thresholdsData?.thresholds ?? THRESHOLDS;
 
   const sortedRuns = (runs ?? []).slice().sort(
     (a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime(),
@@ -32,9 +57,92 @@ export default function Evaluations() {
     avgQuality: run.avg_quality ?? 0,
   }));
 
+  // Per-metric trend from detailed_evaluations
+  const perRunMetricData = (metricsSummary?.per_run ?? []).map((r, idx) => ({
+    run: idx + 1,
+    label: r.started_at ? new Date(r.started_at).toLocaleDateString() : `Run ${idx + 1}`,
+    answer_relevancy: r.answer_relevancy,
+    faithfulness: r.faithfulness,
+    hallucination: r.hallucination,
+    bias: r.bias,
+    toxicity: r.toxicity,
+    linkedin_quality: r.linkedin_quality,
+  }));
+
+  const overallMetrics = metricsSummary?.overall;
+  const radarData = overallMetrics
+    ? Object.keys(METRIC_LABELS).map((m) => ({
+        metric: METRIC_LABELS[m],
+        score: (overallMetrics as unknown as Record<string, number>)[m] ?? 0,
+        threshold: THRESHOLDS[m] ?? 7.0,
+        fullMark: 10,
+      }))
+    : [];
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-white">Evaluations</h1>
+
+      {/* Overall Metric Averages */}
+      {overallMetrics && overallMetrics.total > 0 && (
+        <div className="rounded-xl border border-gray-700 bg-gray-800 p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">Overall Metric Averages</h2>
+            <span className="text-sm text-gray-400">{overallMetrics.total} posts evaluated</span>
+          </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            {/* Radar overview */}
+            <ResponsiveContainer width="100%" height={240}>
+              <RadarChart data={radarData}>
+                <PolarGrid stroke="#374151" />
+                <PolarAngleAxis dataKey="metric" tick={{ fill: "#9ca3af", fontSize: 11 }} />
+                <PolarRadiusAxis angle={30} domain={[0, 10]} tick={{ fill: "#6b7280", fontSize: 9 }} />
+                <Radar name="Threshold" dataKey="threshold" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.08} strokeDasharray="4 4" />
+                <Radar name="Avg Score" dataKey="score" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.25} />
+              </RadarChart>
+            </ResponsiveContainer>
+            {/* Metric badges */}
+            <div className="grid grid-cols-2 gap-3 content-start">
+              {Object.keys(METRIC_LABELS).map((m) => (
+                <MetricBadge
+                  key={m}
+                  name={m}
+                  score={(overallMetrics as unknown as Record<string, number>)[m] ?? 0}
+                  thresholds={liveThresholds}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Per-metric Trend */}
+      {perRunMetricData.length > 1 && (
+        <div className="rounded-xl border border-gray-700 bg-gray-800 p-6">
+          <h2 className="mb-4 text-lg font-semibold text-white">Per-Metric Trends</h2>
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={perRunMetricData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <XAxis dataKey="label" stroke="#9ca3af" tick={{ fontSize: 11 }} />
+              <YAxis stroke="#9ca3af" tick={{ fontSize: 11 }} domain={[0, 10]} />
+              <Tooltip
+                contentStyle={{ backgroundColor: "#1f2937", border: "1px solid #374151", borderRadius: "0.5rem", color: "#f3f4f6" }}
+                formatter={(value: number, name: string) => [value.toFixed(1), METRIC_LABELS[name] ?? name]}
+              />
+              {Object.keys(METRIC_LABELS).map((m) => (
+                <Line
+                  key={m}
+                  type="monotone"
+                  dataKey={m}
+                  stroke={METRIC_COLORS[m] ?? "#6b7280"}
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid gap-6 lg:grid-cols-2">

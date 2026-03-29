@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Loader2, Wifi, WifiOff, Trash2 } from "lucide-react";
+import { Play, Square, Loader2, Wifi, WifiOff, Trash2 } from "lucide-react";
 import {
   startPipeline,
+  cancelPipeline,
+  getRunningPipeline,
   getPipelineRuns,
   getSources,
   type PipelineRunConfig,
@@ -30,10 +32,26 @@ export default function AgentControl() {
     queryFn: getPipelineRuns,
   });
 
+  const { data: runningData, refetch: refetchRunning } = useQuery({
+    queryKey: ["runningPipeline"],
+    queryFn: getRunningPipeline,
+    refetchInterval: 3000,
+  });
+  const isRunning = runningData?.running ?? false;
+
   const runMutation = useMutation({
     mutationFn: startPipeline,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["pipelineRuns"] });
+      queryClient.invalidateQueries({ queryKey: ["runningPipeline"] });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: cancelPipeline,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pipelineRuns"] });
+      refetchRunning();
     },
   });
 
@@ -181,24 +199,42 @@ export default function AgentControl() {
             </div>
           </div>
 
-          {/* Run Button */}
-          <button
-            onClick={handleRun}
-            disabled={runMutation.isPending}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
-          >
-            {runMutation.isPending ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Play size={16} />
-            )}
-            {runMutation.isPending ? "Running..." : "Run Pipeline"}
-          </button>
+          {/* Run / Stop Buttons */}
+          <div className="flex gap-3">
+            <button
+              onClick={handleRun}
+              disabled={isRunning || runMutation.isPending}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+            >
+              {isRunning ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Play size={16} />
+              )}
+              {isRunning ? "Running..." : "Run Pipeline"}
+            </button>
+
+            <button
+              onClick={() => cancelMutation.mutate()}
+              disabled={!isRunning || cancelMutation.isPending}
+              className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {cancelMutation.isPending ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Square size={16} />
+              )}
+              Stop
+            </button>
+          </div>
 
           {runMutation.isError && (
             <p className="text-sm text-red-400">
               Error: {(runMutation.error as Error).message}
             </p>
+          )}
+          {cancelMutation.isSuccess && (
+            <p className="text-sm text-yellow-400">Pipeline stopped.</p>
           )}
         </div>
 
