@@ -28,3 +28,6 @@ Thumbs.db
 
 secret.txt
 template.txt
+
+data/
+frontend/
