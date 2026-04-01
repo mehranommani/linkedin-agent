@@ -110,6 +110,7 @@ def insert_post(
     hashtags: list[str] | None = None,
     generation_attempts: int = 1,
     pipeline_run_id: str | None = None,
+    hook_pattern_used: str | None = None,
 ) -> dict:
     """Insert a new post into the database."""
     post_id = hashlib.md5(original_url.encode()).hexdigest()[:16]
@@ -133,8 +134,9 @@ def insert_post(
             id, title, original_url, source, source_summary, image_url,
             extracted_content, post_text, char_count, hashtags,
             relevance_score, quality_score, faithfulness_score, trending_boost,
-            final_score, content_fingerprint, generation_attempts, pipeline_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            final_score, content_fingerprint, generation_attempts, pipeline_run_id,
+            hook_pattern_used
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (original_url) DO NOTHING
         """,
         [
@@ -142,6 +144,7 @@ def insert_post(
             extracted_content, post_text, char_count, hashtags,
             relevance_score, quality_score, faithfulness_score, trending_boost,
             final_score, fingerprint, generation_attempts, pipeline_run_id,
+            hook_pattern_used,
         ],
     )
     return {"id": post_id, "success": True}

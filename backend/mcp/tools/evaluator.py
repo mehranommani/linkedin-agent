@@ -85,7 +85,7 @@ async def judge_quality(
     Returns quality_score (0-10), issues list, strengths list, passed bool.
     """
     gen_config = ConfigManager.generation()
-    min_chars = gen_config.get("min_char_count", 1200)
+    min_chars = gen_config.get("min_char_count", 1600)
     max_chars = gen_config.get("max_char_count", 3000)
     eval_config = ConfigManager.evaluation()
     min_quality = eval_config.get("min_quality", 7.0)

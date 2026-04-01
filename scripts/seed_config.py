@@ -365,8 +365,8 @@ def seed_config(conn):
         ),
         (
             "emoji_style",
-            "light",
-            "Emoji usage style: light (1-3), moderate (3-5), none",
+            "contextual",
+            "Emoji usage style: contextual (match to content energy), light (1-3), moderate (3-5), none",
         ),
         (
             "feedback_config",

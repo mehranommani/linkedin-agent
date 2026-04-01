@@ -6,7 +6,6 @@ The pipeline discovers available sources dynamically via list_available.
 """
 from __future__ import annotations
 
-import json
 import httpx
 from typing import Any
 
@@ -84,9 +83,13 @@ async def fetch_source(
 
 @mcp_server.tool()
 async def extract_article(url: str) -> dict:
-    """Extract article content from a URL using html2text."""
+    """Extract article content from a URL using trafilatura (main body only, no nav/footer noise).
+
+    Falls back to Jina Reader API for JS-rendered pages where trafilatura returns empty,
+    and to html2text as a last resort.
+    """
     try:
-        import html2text
+        import trafilatura
 
         async with httpx.AsyncClient(
             timeout=15,
@@ -95,16 +98,40 @@ async def extract_article(url: str) -> dict:
         ) as client:
             resp = await client.get(url)
             resp.raise_for_status()
+            html = resp.text
 
-        converter = html2text.HTML2Text()
-        converter.ignore_links = True
-        converter.ignore_images = True
-        converter.body_width = 0
-        content = converter.handle(resp.text)
+        # Primary: trafilatura — strips nav/footer/ads, returns article body only
+        content = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=False,
+            favor_precision=True,
+            deduplicate=True,
+        )
 
-        # Trim to reasonable length
-        content = content[:5000]
+        # Fallback: Jina Reader API for JS-rendered pages (no API key required for basic use)
+        if not content or len(content.strip()) < 200:
+            try:
+                async with httpx.AsyncClient(timeout=20, follow_redirects=True) as jina_client:
+                    jina_resp = await jina_client.get(
+                        f"https://r.jina.ai/{url}",
+                        headers={"Accept": "text/plain", "User-Agent": "LinkedInAgent/2.0"},
+                    )
+                    if jina_resp.status_code == 200 and len(jina_resp.text.strip()) > 200:
+                        content = jina_resp.text
+            except Exception:
+                pass
 
+        # Last resort: html2text (noisier but always works)
+        if not content or len(content.strip()) < 200:
+            import html2text
+            converter = html2text.HTML2Text()
+            converter.ignore_links = True
+            converter.ignore_images = True
+            converter.body_width = 0
+            content = converter.handle(html)
+
+        content = (content or "")[:10000]
         return {"content": content, "char_count": len(content), "success": True}
     except Exception as e:
         return {"content": "", "char_count": 0, "success": False, "error": str(e)}

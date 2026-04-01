@@ -104,6 +104,7 @@ PostStats.model_rebuild()
 
 class LinkedInPost(BaseModel):
     """Structured output from the LLM post generator."""
+    angle: str = Field(description="The single most interesting angle identified before writing (1 sentence)")
     hook: str = Field(description="Opening line that grabs attention (1-2 sentences)")
     body: str = Field(description="Main content with insights and analysis (3-5 paragraphs)")
     takeaway: str = Field(description="Key takeaway or call-to-action (1-2 sentences)")

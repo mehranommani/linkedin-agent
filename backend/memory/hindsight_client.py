@@ -117,6 +117,9 @@ async def ensure_bank() -> None:
     # --- Mental Models: pre-computed reflections for frequent queries ---
     await _setup_mental_models(bank_id)
 
+    # --- Seed style examples (idempotent — skips if already stored) ---
+    await _seed_style_examples()
+
 
 async def _run_sync(fn_name: str, *args, **kwargs):
     """Run a synchronous Hindsight SDK management method in an isolated thread.
@@ -196,7 +199,32 @@ async def _setup_directives(bank_id: str) -> None:
 
 
 async def _setup_mental_models(bank_id: str) -> None:
-    """Create mental models if they don't exist yet."""
+    """Create (or recreate) mental models aligned with the data we actually have.
+
+    Two models were replaced:
+    - "Hook Pattern Performance" → "Post Structure Templates" (queries style_example memories we have)
+    - "Source Type Quality" → "Character Count & Density Patterns" (queries char_count data we have)
+    Two are kept but refreshed:
+    - "User Style Preferences" (feedback ratings provide signal)
+    - "Quality Failure Patterns" (recreated clean — previous content was garbled tool-call JSON)
+    """
+    try:
+        response = await _run_sync("list_mental_models", bank_id=bank_id)
+        existing = {m.name: m for m in (response.items or [])}
+    except Exception:
+        existing = {}
+
+    # Delete outdated / garbled models so they can be recreated clean
+    models_to_delete = {"Hook Pattern Performance", "Source Type Quality", "Quality Failure Patterns"}
+    for name in models_to_delete:
+        if name in existing:
+            try:
+                await _run_sync("delete_mental_model", bank_id=bank_id, name=name)
+                logger.info("Deleted stale mental model: %s", name)
+            except Exception as e:
+                logger.debug("Could not delete mental model %s: %s", name, e)
+
+    # Refresh existing names after deletions
     try:
         response = await _run_sync("list_mental_models", bank_id=bank_id)
         existing_names = {m.name for m in (response.items or [])}
@@ -205,21 +233,24 @@ async def _setup_mental_models(bank_id: str) -> None:
 
     mental_models = [
         {
-            "name": "Hook Pattern Performance",
+            "name": "Post Structure Templates",
             "source_query": (
-                "Which hook patterns (story-hook, pattern-interrupt, bold-statement, "
-                "curiosity-gap, contrarian, question-hook) have been used, and what "
-                "evaluation scores did they achieve? Which should be preferred?"
+                "What formatting structures and opening patterns appear in high-quality example posts? "
+                "Include: use of → arrows for sequential steps, > callout lines for key specs, "
+                "numbered 'Here's how it works' sections, single-sentence emphasis lines, "
+                "bold-statement openers with specific numbers, curiosity-gap openers with surprising results, "
+                "and any structural patterns that earned high evaluation scores."
             ),
-            "tags": ["hooks", "performance"],
+            "tags": ["structure", "templates", "style"],
         },
         {
             "name": "User Style Preferences",
             "source_query": (
                 "What writing style does the user prefer for LinkedIn posts? "
-                "Include: preferred tone (analytical vs conversational), "
-                "optimal post length, emoji usage, hashtag count, "
-                "and any explicit feedback given via ratings."
+                "Include: preferred tone (analytical vs conversational vs bold), "
+                "optimal post length, emoji usage and placement, hashtag count, "
+                "and any explicit feedback given via ratings. "
+                "What style elements appear in posts the user rated positively?"
             ),
             "tags": ["style", "preferences"],
         },
@@ -228,18 +259,18 @@ async def _setup_mental_models(bank_id: str) -> None:
             "source_query": (
                 "What writing patterns, approaches, or content types consistently "
                 "fail evaluation? What causes low bias scores, hallucination failures, "
-                "or guardrail violations? What should be avoided?"
+                "or guardrail violations? What should be avoided in future posts?"
             ),
             "tags": ["failures", "quality"],
         },
         {
-            "name": "Source Type Quality",
+            "name": "Character Count & Density Patterns",
             "source_query": (
-                "Which content source types (github, arxiv, papers, hackernews, rss, reddit) "
-                "produce posts with higher quality scores? Are there source-specific "
-                "writing approaches that work better?"
+                "What post lengths and character counts correlate with passing evaluation vs failing? "
+                "What is the optimal character range? What paragraph density (sentences per paragraph) "
+                "appears in high-quality example posts? Are shorter or longer posts rated better?"
             ),
-            "tags": ["sources", "quality"],
+            "tags": ["length", "density", "quality"],
         },
     ]
 
@@ -257,6 +288,68 @@ async def _setup_mental_models(bank_id: str) -> None:
                 logger.info("Created mental model: %s", m["name"])
             except Exception as e:
                 logger.debug("Mental model %s may already exist: %s", m["name"], e)
+
+    # Explicitly refresh all models now so they have content immediately
+    await _refresh_all_mental_models(bank_id)
+
+
+async def _refresh_all_mental_models(bank_id: str) -> None:
+    """Refresh all mental models so they have content from current memories."""
+    try:
+        response = await _run_sync("list_mental_models", bank_id=bank_id)
+        for m in (response.items or []):
+            try:
+                await _run_sync("refresh_mental_model", bank_id=bank_id, name=m.name)
+                logger.info("Refreshed mental model: %s", m.name)
+            except Exception as e:
+                logger.debug("Could not refresh mental model %s: %s", m.name, e)
+    except Exception as e:
+        logger.warning("Could not refresh mental models: %s", e)
+
+
+_STYLE_EXAMPLES = [
+    {
+        "description": "LMCache — infrastructure/optimization problem-solution template",
+        "source_type": "github",
+        "post": """Your LLM inference is burning 50% of its compute on work it has already done.
+
+If you are running RAG or Multi-Turn Chat, you are likely recomputing the KV Cache for the same documents over and over again.
+
+I found the open-source library that solves this. It's called LMCache. It makes the KV cache Persistent and Shareable across different engine instances (vLLM, SGLang).
+
+The "Cheat Code" for AI Infrastructure => Instead of the cache dying when a request finishes, LMCache offloads it to a shared layer (CPU/Disk/Network).
+
+This unlocks architecture patterns that were previously impossible:
+1. Instant RAG
+Process a 100-page PDF once. Store the KV cache. Now any user query against that doc starts instantly (Zero Time-To-First-Token).
+
+2. Disaggregated Serving
+Run heavy "Prefill" on H100s. Stream the cache to cheaper L4s for "Decoding."
+
+3. Context Sharing
+Multiple users asking about the same context? Compute it once, serve everyone.
+
+🚀 15x throughput gain in multi-round QA workloads.
+⚡ 3-10x reduction in Time-To-First-Token (TTFT).
+
+It integrates directly with vLLM and SGLang. Stop letting your GPUs do the same homework twice.
+
+#MachineLearning #AIInfrastructure #LLM #MLOps #GenerativeAI""",
+    },
+]
+
+
+async def _seed_style_examples() -> None:
+    """Store curated style examples in Hindsight (idempotent — skips if already present)."""
+    for ex in _STYLE_EXAMPLES:
+        try:
+            await store_style_example(
+                example_post=ex["post"],
+                description=ex["description"],
+                source_type=ex["source_type"],
+            )
+        except Exception as e:
+            logger.debug("Could not seed style example '%s': %s", ex["description"], e)
 
 
 async def store_generation_experience(
@@ -592,6 +685,61 @@ async def recall_feedback(query: str, max_tokens: int | None = None) -> list[dic
     except Exception as e:
         logger.error("Failed to recall from Hindsight: %s", e)
         return []
+
+
+async def store_style_example(
+    example_post: str,
+    description: str,
+    source_type: str = "github",
+) -> bool:
+    """Store a high-quality example post as a World Fact in Hindsight.
+
+    These are external reference posts (not generated by the agent) that demonstrate
+    the desired formatting style. Hindsight uses them to guide future generation.
+
+    Idempotent: skips storage if a style_example with the same description already exists.
+    """
+    client = get_client()
+
+    # Dedup check — avoid re-fragmenting the same example on every startup
+    try:
+        existing = client.list_memories(bank_id=_get_bank_id(), tags=["style_example"])
+        if any(
+            m.get("metadata", {}).get("description") == description
+            for m in (existing.items or [])
+        ):
+            logger.debug("Style example already stored, skipping: %s", description)
+            return True
+    except Exception:
+        pass  # If check fails, proceed to store
+
+    content = (
+        f"HIGH-QUALITY EXAMPLE POST ({description}):\n\n"
+        f"{example_post}\n\n"
+        f"Key style elements from this example: "
+        f"short punchy sentences, → arrows for sequential steps, "
+        f"> callout lines for key specs/features, specific concrete numbers, "
+        f"single-sentence lines for emphasis."
+    )
+    try:
+        result = await client.aretain(
+            bank_id=_get_bank_id(),
+            content=content,
+            context=f"External example demonstrating ideal LinkedIn post formatting for {source_type} content",
+            metadata={"type": "style_example", "source_type": source_type, "description": description},
+            tags=["style_example", "good_example", "feedback", f"source:{source_type}"],
+            entities=[
+                {"text": "style_example", "type": "user_label"},
+                {"text": source_type, "type": "source_type"},
+                {"text": "high_quality", "type": "quality_tier"},
+            ],
+            timestamp=datetime.now(),
+        )
+        logger.info("Stored style example in Hindsight: %s, success=%s", description, result.success)
+        return result.success
+    except Exception as e:
+        logger.error("Failed to store style example in Hindsight: %s", e)
+        return False
 
 
 async def check_health() -> dict:

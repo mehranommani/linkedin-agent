@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import httpx
+import instructor
+from openai import AsyncOpenAI
 from typing import Any
 
 from backend.mcp.server import mcp_server
@@ -233,6 +235,75 @@ async def _chat_with_fallback(
     raise RuntimeError(f"All providers failed. Last error: {last_error}")
 
 
+async def _generate_post_with_instructor(
+    messages: list[dict],
+    temperature: float,
+    seed: int | None = None,
+) -> LinkedInPost:
+    """Generate a structured LinkedInPost using instructor with provider fallback.
+
+    instructor enforces the Pydantic schema and auto-retries on validation failure,
+    replacing the manual json.loads + bare-except pattern.
+    """
+    if _get_backend() == "ollama":
+        # Local-only mode
+        ollama_url = _get_ollama_url()
+        raw_client = AsyncOpenAI(base_url=f"{ollama_url}/v1", api_key="ollama")
+        client = instructor.from_openai(raw_client, mode=instructor.Mode.JSON)
+        kwargs: dict[str, Any] = {"temperature": temperature}
+        if seed is not None:
+            kwargs["seed"] = seed
+        return await client.chat.completions.create(
+            model=_get_model(),
+            messages=messages,
+            response_model=LinkedInPost,
+            max_retries=2,
+            **kwargs,
+        )
+
+    providers = _get_providers()
+    last_error: Exception | None = None
+
+    for p in providers:
+        try:
+            if p.get("api_url") is None:
+                # Ollama fallback
+                ollama_url = _get_ollama_url()
+                raw_client = AsyncOpenAI(base_url=f"{ollama_url}/v1", api_key="ollama")
+                client = instructor.from_openai(raw_client, mode=instructor.Mode.JSON)
+                model = p["model"]
+                kwargs = {"temperature": temperature}
+                if seed is not None:
+                    kwargs["seed"] = seed
+            else:
+                raw_client = AsyncOpenAI(base_url=p["api_url"], api_key=p["api_key"])
+                client = instructor.from_openai(raw_client, mode=instructor.Mode.JSON)
+                model = p["model"]
+                kwargs = {"temperature": temperature}
+
+            post = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=LinkedInPost,
+                max_retries=2,
+                **kwargs,
+            )
+            if p.get("name", "").startswith("groq-") and p != providers[0]:
+                logger.info("Using fallback provider '%s'", p.get("name"))
+            return post
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate limit" in err_str or "rate_limit" in err_str:
+                logger.warning("Rate limit on provider '%s', trying next...", p.get("name"))
+            else:
+                logger.warning("Provider '%s' failed: %s, trying next...", p.get("name"), e)
+            last_error = e
+            continue
+
+    raise RuntimeError(f"All providers failed. Last error: {last_error}")
+
+
 async def _ollama_request(url: str, payload: dict, retries: int = 2) -> dict:
     """Make a request to Ollama with retry logic."""
     for attempt in range(retries + 1):
@@ -295,6 +366,7 @@ async def generate_post(
     previous_issues: list[str] | None = None,
     lessons_learned: str | None = None,
     feedback_patterns: str | None = None,
+    avoid_hook_patterns: list[str] | None = None,
     temperature: float = 0.7,
     seed: int | None = None,
 ) -> dict:
@@ -328,10 +400,10 @@ async def generate_post(
 
     content_ctx = ""
     if content:
-        content_ctx = f"\n\nExtracted article content:\n{content[:3000]}"
+        content_ctx = f"\n\nExtracted article content:\n{content[:8000]}"
 
     # Use the v2 system prompt from resources (dynamic, config-driven)
-    system_prompt = post_generation_prompt()
+    system_prompt = post_generation_prompt(avoid_patterns=avoid_hook_patterns)
 
     url_line = f"\nSource URL (MUST appear verbatim in the url field): {source_url}" if source_url else ""
 
@@ -343,37 +415,19 @@ Summary: {summary}{content_ctx}{trending_ctx}{avoid_ctx}{issues_ctx}{lessons_ctx
 
 Respond in JSON format matching the output format specified above."""
 
-    # Extended schema with v2 fields
-    schema = {
-        "type": "object",
-        "properties": {
-            "hook": {"type": "string"},
-            "body": {"type": "string"},
-            "takeaway": {"type": "string"},
-            "hashtags": {"type": "array", "items": {"type": "string"}},
-            "url": {"type": "string"},
-            "hook_pattern_used": {"type": "string"},
-            "seo_keywords_used": {"type": "array", "items": {"type": "string"}},
-            "emoji_placement": {"type": "string"},
-        },
-        "required": ["hook", "body", "takeaway", "hashtags", "url"],
-    }
-
-    raw = await _ollama_chat(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        format_schema=schema,
-        seed=seed,
-    )
-
+    # Use instructor for validated structured output — auto-retries on schema mismatch
     try:
-        data = json.loads(raw)
-        post = LinkedInPost(**data)
+        post = await _generate_post_with_instructor(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            seed=seed,
+        )
         return {
             "post_text": post.full_text,
+            "angle": post.angle,
             "hook": post.hook,
             "body": post.body,
             "takeaway": post.takeaway,
@@ -384,11 +438,12 @@ Respond in JSON format matching the output format specified above."""
             "seo_keywords_used": post.seo_keywords_used,
             "emoji_placement": post.emoji_placement,
         }
-    except (json.JSONDecodeError, Exception) as e:
+    except Exception as e:
+        logger.error("Post generation failed: %s", e)
         return {
-            "post_text": raw,
-            "error": f"Structured output parse failed: {e}",
-            "char_count": len(raw),
+            "post_text": "",
+            "error": f"Generation failed: {e}",
+            "char_count": 0,
         }
 
 

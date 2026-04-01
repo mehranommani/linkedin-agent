@@ -131,10 +131,15 @@ async def filter_and_score_node(state: PipelineState) -> dict:
     if not items:
         return {"filtered_items": [], "items_remaining": 0, "logs": logs, "step": "filter"}
 
+    # When a source type filter is active (single-source run), we have fewer raw items
+    # but need more candidates to meet max_posts. Process up to 100 instead of 50.
+    source_types_filter = state.get("run_config", {}).get("sources")
+    batch_limit = 100 if source_types_filter else 50
+
     # Batch relevance check via LLM
     batch_input = [
         {"title": item.get("title", ""), "summary": item.get("summary", "")[:150]}
-        for item in items[:50]  # Limit batch size
+        for item in items[:batch_limit]
     ]
 
     judgments_result = await batch_judge_relevance(items=batch_input)
@@ -176,7 +181,7 @@ async def filter_and_score_node(state: PipelineState) -> dict:
     skipped_irrelevant = 0
     skipped_existing = 0
 
-    for i, item in enumerate(items[:50]):
+    for i, item in enumerate(items[:batch_limit]):
         judgment = judgment_map.get(i + 1, {"is_relevant": True, "score": 7.0})
 
         if not judgment.get("is_relevant", False):
@@ -296,6 +301,16 @@ async def generate_post_node(state: PipelineState) -> dict:
         content_summary=item.get("summary", "")
     )
 
+    # Fetch recently used hook patterns to force variety across posts
+    from backend.database import fetch_all as _fetch_all_hooks
+    recent_hooks = [
+        r[0] for r in _fetch_all_hooks(
+            "SELECT hook_pattern_used FROM posts "
+            "WHERE hook_pattern_used IS NOT NULL AND hook_pattern_used != '' "
+            "ORDER BY created_at DESC LIMIT 8"
+        ) if r[0]
+    ]
+
     # Build rich, actionable retry feedback from the previous evaluation
     previous_issues = []
     current_evaluation = state.get("current_evaluation")
@@ -324,7 +339,17 @@ async def generate_post_node(state: PipelineState) -> dict:
         if improvements:
             previous_issues.extend(improvements[:3])
 
-        # Fallback: include threshold failures if no detailed reasoning found
+        # Always include guardrail failures (banned phrases, formatting, etc.)
+        # These MUST be fixed on retry and are separate from metric feedback
+        guardrail_issues = [
+            issue for issue in current_evaluation.get("issues", [])
+            if any(kw in issue.lower() for kw in ("banned", "guardrail", "markdown", "bullet", "hashtag", "char", "url"))
+        ]
+        for gi in guardrail_issues:
+            if gi not in previous_issues:
+                previous_issues.insert(0, f"MUST FIX: {gi}")
+
+        # Fallback: include all evaluation issues if nothing specific found
         if not previous_issues:
             previous_issues = current_evaluation.get("issues", [])
 
@@ -345,6 +370,7 @@ async def generate_post_node(state: PipelineState) -> dict:
         previous_issues=previous_issues,
         lessons_learned=lessons,
         feedback_patterns=feedback_patterns or None,
+        avoid_hook_patterns=recent_hooks or None,
         temperature=temp,
         seed=seed,
     )
@@ -482,6 +508,7 @@ async def save_post_node(state: PipelineState) -> dict:
         hashtags=post.get("hashtags"),
         generation_attempts=state.get("generation_attempts", 1),
         pipeline_run_id=state.get("run_id"),
+        hook_pattern_used=post.get("hook_pattern_used"),
     )
 
     post_id = result.get("id", "")
@@ -686,6 +713,12 @@ async def run_pipeline(
 ) -> PipelineState:
     """Run the complete pipeline and return final state."""
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    # When filtering to 1-2 source types, fetch more per source to ensure enough candidates
+    # after dedup/relevance filtering to meet max_posts. With 50% typical pass rate,
+    # we need at least 2×max_posts filtered items, so fetch 3× to be safe.
+    if sources and len(sources) <= 2:
+        limit_per_source = max(limit_per_source, max_posts * 3)
 
     # Log pipeline start
     log_pipeline_run(

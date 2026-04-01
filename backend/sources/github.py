@@ -147,7 +147,7 @@ class GitHubSource(BaseSource):
                     "order": "desc",
                     "per_page": 6,
                 },
-                fetch_readme=False,
+                fetch_readme=True,
             )
             for item in result:
                 if item.url not in seen:
@@ -194,11 +194,15 @@ class GitHubSource(BaseSource):
             if fetch_readme:
                 readme_content = await self._fetch_readme(client, repo.get("full_name", ""))
 
+            releases_summary = await self._fetch_releases(client, repo.get("full_name", ""))
+
             description = repo.get("description") or ""
             summary = description
             if readme_content:
-                # Use first 500 chars of README for richer context
-                summary = f"{description}\n\n{readme_content[:500]}" if description else readme_content[:500]
+                # Use first 2000 chars of README for richer context
+                summary = f"{description}\n\n{readme_content[:2000]}" if description else readme_content[:2000]
+            if releases_summary:
+                summary = f"{summary}\n\nRecent releases: {releases_summary}"
 
             topics = repo.get("topics", [])
 
@@ -233,7 +237,27 @@ class GitHubSource(BaseSource):
         try:
             resp = await client.get(url, headers={"Accept": "application/vnd.github.raw+json"})
             if resp.status_code == 200:
-                return resp.text[:2000]
+                return resp.text[:10000]
+        except Exception:
+            pass
+        return ""
+
+    async def _fetch_releases(self, client: httpx.AsyncClient, full_name: str) -> str:
+        """Fetch the 3 most recent releases for a repo (best-effort)."""
+        if not full_name:
+            return ""
+        url = f"https://api.github.com/repos/{full_name}/releases"
+        try:
+            resp = await client.get(url, params={"per_page": 3})
+            if resp.status_code == 200:
+                releases = resp.json()
+                parts = []
+                for r in releases[:3]:
+                    name = r.get("name") or r.get("tag_name", "")
+                    body = (r.get("body") or "")[:500].strip()
+                    if name:
+                        parts.append(f"{name}: {body}" if body else name)
+                return " | ".join(parts)
         except Exception:
             pass
         return ""

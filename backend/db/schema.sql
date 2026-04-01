@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS posts (
     content_fingerprint TEXT,
     generation_attempts INTEGER DEFAULT 1,
     pipeline_run_id   TEXT,
+    hook_pattern_used TEXT,
     human_rating_avg  REAL DEFAULT 0.0,
     human_feedback_count INTEGER DEFAULT 0,
     detailed_eval_id  TEXT

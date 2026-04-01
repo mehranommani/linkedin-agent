@@ -323,6 +323,10 @@ def check_programmatic_guardrails(post_text: str) -> dict[str, Any]:  # noqa: C9
     found_md = [p for p in markdown_patterns if p in post_text]
     if found_md:
         issues.append(f"Post contains markdown formatting ({', '.join(found_md)}) — use plain text only")
+    # Markdown headers check (## or ### at start of line)
+    header_lines = [l.strip() for l in post_text.split('\n') if re.match(r'^#{1,6}\s', l.strip())]
+    if header_lines:
+        issues.append("Post contains markdown headers (## / ###) — use plain paragraphs only, no section headers")
 
     # No text after hashtags check
     hashtag_positions = [m.start() for m in re.finditer(r'(?<!\w)#[A-Za-z]\w*', post_text)]
