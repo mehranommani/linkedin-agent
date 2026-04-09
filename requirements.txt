@@ -32,6 +32,9 @@ html2text>=2024.2.26
 # Data Processing
 pandas>=2.0.0
 
+# DSPy — prompt optimization + runtime Refine retries
+dspy-ai>=2.6
+
 # Optional: Evaluation (not required for core pipeline)
 # ragas>=0.1.0
 # langsmith>=0.1.0

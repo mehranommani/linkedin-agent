@@ -28,6 +28,12 @@ class PipelineState(TypedDict, total=False):
     current_item_index: int        # Index in filtered_items
     extracted_content: str         # Article content for current item
 
+    # --- Research Phase (between extract and generate) ---
+    research_brief: dict | None     # ResearchBrief from research_content_node
+    research_attempts: int          # Retry counter for research phase
+    research_evaluation: dict | None  # Research brief evaluation result
+    research_failed: bool           # True if research retries exhausted → degraded mode
+
     # --- Generation ---
     current_post: dict | None      # Generated post data
     generation_attempts: int       # Retry counter for current item

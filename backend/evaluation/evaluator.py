@@ -20,9 +20,138 @@ from backend.evaluation.metrics import (
     evaluate_bias_toxicity,
     evaluate_linkedin_quality,
     check_programmatic_guardrails,
+    _ollama_chat,
 )
 
 logger = logging.getLogger(__name__)
+
+_GENERIC_ANGLE_PHRASES = [
+    "powerful tool", "improves performance", "makes it easier",
+    "great for", "useful for", "helps with", "designed to",
+    "enables developers", "allows you to", "simplifies",
+]
+
+_BANNED_HOOK_OPENERS = ["what if you could", "what if you", "introducing "]
+
+
+def check_research_guardrails(brief: dict) -> tuple[bool, list[str]]:
+    """Programmatic validation of a ResearchBrief dict.
+
+    Fast, deterministic — runs before the LLM evaluation call.
+    Returns (passed: bool, issues: list[str]).
+    """
+    issues: list[str] = []
+    angle = (brief.get("angle") or "").strip()
+    evidence = brief.get("evidence") or []
+    hook_draft = (brief.get("hook_draft") or "").strip()
+    confidence = float(brief.get("confidence") or 0.0)
+
+    # 1. Angle must not be empty or generic
+    if not angle:
+        issues.append("angle is empty")
+    elif any(p in angle.lower() for p in _GENERIC_ANGLE_PHRASES):
+        issues.append("angle is generic — does not name a specific surprising fact")
+
+    # 2. At least one evidence item must be a real data point (not a sentinel)
+    real_evidence = [e for e in evidence if not ("[no" in e.lower() or "[not" in e.lower())]
+    if not real_evidence:
+        issues.append("no concrete evidence — all evidence entries are empty sentinels")
+
+    # 3. Hook draft must not use banned openers
+    hook_lower = hook_draft.lower()
+    if any(hook_lower.startswith(b) for b in _BANNED_HOOK_OPENERS):
+        issues.append("hook_draft uses a banned opener pattern (What if you could / Introducing)")
+
+    # 4. Confidence must be above minimum threshold
+    if confidence < 0.3:
+        issues.append(f"confidence {confidence:.2f} too low — source lacks concrete content")
+
+    return len(issues) == 0, issues
+
+
+async def evaluate_research_brief(brief: dict) -> dict[str, Any]:
+    """Two-stage evaluation of a ResearchBrief.
+
+    Stage 1: programmatic guardrails (instant).
+    Stage 2: LLM judge (1 call) — only runs if programmatic passes.
+
+    Returns dict with: passed, overall, specificity, hook_viability,
+    evidence_grounding, issues.
+    """
+    from backend.mcp.resources.prompts import research_evaluation_prompt
+
+    prog_passed, prog_issues = check_research_guardrails(brief)
+
+    if not prog_passed:
+        return {
+            "passed": False,
+            "overall": 0.0,
+            "specificity": 0.0,
+            "hook_viability": 0.0,
+            "evidence_grounding": 0.0,
+            "issues": prog_issues,
+            "stage": "programmatic",
+        }
+
+    # Stage 2: LLM judge
+    prompt = research_evaluation_prompt(
+        angle=brief.get("angle", ""),
+        evidence=brief.get("evidence", []),
+        hook_draft=brief.get("hook_draft", ""),
+        confidence=float(brief.get("confidence", 0.0)),
+        content_type=brief.get("content_type", "github_tool"),
+    )
+
+    _schema = {
+        "type": "object",
+        "properties": {
+            "specificity": {"type": "number"},
+            "hook_viability": {"type": "number"},
+            "evidence_grounding": {"type": "number"},
+            "overall": {"type": "number"},
+            "passed": {"type": "boolean"},
+            "issues": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["specificity", "hook_viability", "evidence_grounding", "overall", "passed"],
+    }
+
+    try:
+        raw = await _ollama_chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            format_schema=_schema,
+        )
+        data = json.loads(raw)
+        # Recompute overall as safety check
+        scores = [
+            float(data.get("specificity", 0)),
+            float(data.get("hook_viability", 0)),
+            float(data.get("evidence_grounding", 0)),
+        ]
+        overall = round(sum(scores) / len(scores), 2)
+        passed = overall >= 6.0
+        return {
+            "passed": passed,
+            "overall": overall,
+            "specificity": scores[0],
+            "hook_viability": scores[1],
+            "evidence_grounding": scores[2],
+            "issues": data.get("issues", []) if not passed else [],
+            "stage": "llm",
+        }
+    except Exception as e:
+        logger.warning("Research brief LLM evaluation failed, using programmatic only: %s", e)
+        # Fallback: if LLM judge fails, treat as passed if programmatic passed
+        # (don't block the pipeline because the judge had an error)
+        return {
+            "passed": True,
+            "overall": 6.0,
+            "specificity": 6.0,
+            "hook_viability": 6.0,
+            "evidence_grounding": 6.0,
+            "issues": [],
+            "stage": "programmatic_fallback",
+        }
 
 
 async def run_full_evaluation(

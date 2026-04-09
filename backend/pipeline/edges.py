@@ -59,3 +59,22 @@ def should_continue(state: PipelineState) -> str:
     if remaining <= 0 or len(accepted) >= max_posts:
         return "done"
     return "process"
+
+
+def research_gate_decision(state: PipelineState) -> str:
+    """Decide what to do after research evaluation: pass, retry, or fallback.
+
+    - pass:    research brief passed → proceed to generate_post
+    - retry:   failed but attempts < 2 → retry research with higher temperature
+    - fallback: failed after 2 attempts → degraded mode, generate without brief
+    """
+    evaluation = state.get("research_evaluation") or {}
+    attempts = state.get("research_attempts", 0)
+
+    if evaluation.get("passed", False):
+        return "pass"
+
+    if attempts < 2:
+        return "retry"
+
+    return "fallback"

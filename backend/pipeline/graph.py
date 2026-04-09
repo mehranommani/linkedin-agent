@@ -24,7 +24,7 @@ from datetime import datetime
 from langgraph.graph import StateGraph, END
 
 from backend.pipeline.state import PipelineState
-from backend.pipeline.edges import quality_gate_decision, should_continue
+from backend.pipeline.edges import quality_gate_decision, should_continue, research_gate_decision
 from backend.config import ConfigManager
 
 # MCP tool functions (called directly, not via MCP protocol in-process)
@@ -33,7 +33,7 @@ from backend.mcp.tools.database import (
     insert_post, check_url_exists, log_pipeline_run,
     get_active_sources,
 )
-from backend.mcp.tools.llm import generate_post as llm_generate_post, batch_judge_relevance
+from backend.mcp.tools.llm import generate_post as llm_generate_post, batch_judge_relevance, research_content as llm_research_content
 from backend.mcp.tools.evaluator import check_duplicate as eval_check_duplicate
 from backend.mcp.resources.prompts import lessons_learned_prompt
 
@@ -131,10 +131,9 @@ async def filter_and_score_node(state: PipelineState) -> dict:
     if not items:
         return {"filtered_items": [], "items_remaining": 0, "logs": logs, "step": "filter"}
 
-    # When a source type filter is active (single-source run), we have fewer raw items
-    # but need more candidates to meet max_posts. Process up to 100 instead of 50.
-    source_types_filter = state.get("run_config", {}).get("sources")
-    batch_limit = 100 if source_types_filter else 50
+    # Keep batch small enough for local Ollama judge to finish within timeout.
+    # 30 items per batch is safe for qwen2.5:7b within 120s.
+    batch_limit = 30
 
     # Batch relevance check via LLM
     batch_input = [
@@ -247,6 +246,10 @@ async def pick_next_item_node(state: PipelineState) -> dict:
         "generation_attempts": 0,
         "current_post": None,
         "extracted_content": "",
+        "research_brief": None,
+        "research_attempts": 0,
+        "research_evaluation": None,
+        "research_failed": False,
         "logs": logs,
         "step": "pick_next",
     }
@@ -272,6 +275,114 @@ async def extract_article_node(state: PipelineState) -> dict:
             logger.warning(f"Article extraction failed: {e}")
 
     return {"extracted_content": content, "logs": logs, "step": "extract"}
+
+
+async def research_content_node(state: PipelineState) -> dict:
+    """Research Agent: extract a structured brief from source content.
+
+    Runs typed, extractive questions per content type — no open-ended prompts.
+    Produces a ResearchBrief that the Writer uses as its factual foundation.
+    Temperature starts low (0.3) and escalates on retry.
+    """
+    item = state.get("current_item")
+    if not item:
+        return state
+
+    attempt = state.get("research_attempts", 0) + 1
+    logs = await _log(state, f"Researching content (attempt {attempt})...")
+
+    # Temperature escalates on retry to encourage different extraction strategy
+    temps = [0.3, 0.5, 0.7]
+    temp = temps[min(attempt - 1, len(temps) - 1)]
+
+    # Inject issues from previous failed attempt
+    previous_issues: list[str] = []
+    prev_eval = state.get("research_evaluation")
+    if prev_eval and not prev_eval.get("passed", False):
+        previous_issues = prev_eval.get("issues", [])
+
+    content = state.get("extracted_content") or item.get("summary", "")
+
+    result = await llm_research_content(
+        title=item.get("title", ""),
+        content=content,
+        source=item.get("source", "github"),
+        source_url=item.get("url", ""),
+        previous_issues=previous_issues or None,
+        temperature=temp,
+    )
+
+    ct = result.get("content_type", "unknown")
+    conf = result.get("confidence", 0.0)
+    angle_preview = result.get("angle", "")[:60]
+    logs = await _log(
+        {**state, "logs": logs},
+        f"Research: type={ct} confidence={conf:.2f} angle='{angle_preview}...'"
+    )
+
+    return {
+        "research_brief": result if result.get("success") else None,
+        "research_attempts": attempt,
+        "research_evaluation": None,  # reset for evaluate step
+        "logs": logs,
+        "step": "research",
+    }
+
+
+async def evaluate_research_node(state: PipelineState) -> dict:
+    """Research Evaluator: validate the research brief quality.
+
+    Two-stage: programmatic guardrails (instant) + LLM judge (1 call).
+    Sets research_failed=True and clears brief if retries exhausted.
+    """
+    from backend.evaluation.evaluator import evaluate_research_brief
+
+    brief = state.get("research_brief")
+    attempts = state.get("research_attempts", 0)
+
+    if not brief:
+        # No brief — go straight to fallback
+        logs = await _log(state, "No research brief produced — using degraded generation mode")
+        return {
+            "research_evaluation": {"passed": False, "overall": 0.0, "issues": ["no brief produced"]},
+            "research_failed": True,
+            "logs": logs,
+            "step": "evaluate_research",
+        }
+
+    logs = await _log(state, "Evaluating research brief (programmatic + LLM)...")
+
+    evaluation = await evaluate_research_brief(brief)
+
+    passed = evaluation.get("passed", False)
+    overall = evaluation.get("overall", 0.0)
+    stage = evaluation.get("stage", "")
+    status = "PASSED" if passed else f"FAILED (overall={overall:.1f}, stage={stage})"
+
+    logs = await _log(
+        {**state, "logs": logs},
+        f"Research eval: {status} | "
+        f"specificity={evaluation.get('specificity', 0):.1f} "
+        f"hook_viability={evaluation.get('hook_viability', 0):.1f} "
+        f"evidence_grounding={evaluation.get('evidence_grounding', 0):.1f}"
+    )
+
+    # If we've exhausted retries and still failing → fallback mode
+    research_failed = not passed and attempts >= 2
+
+    if research_failed:
+        logs = await _log(
+            {**state, "logs": logs},
+            "Research retries exhausted — generating without brief (degraded mode)"
+        )
+
+    return {
+        "research_evaluation": evaluation,
+        "research_failed": research_failed,
+        "research_brief": brief if not research_failed else None,
+        "logs": logs,
+        "step": "evaluate_research",
+    }
 
 
 async def generate_post_node(state: PipelineState) -> dict:
@@ -311,95 +422,105 @@ async def generate_post_node(state: PipelineState) -> dict:
         ) if r[0]
     ]
 
-    # Build rich, actionable retry feedback from the previous evaluation
-    previous_issues = []
+    # Build feedback from the previous LangGraph evaluation cycle (empty on first attempt)
+    previous_feedback = ""
     current_evaluation = state.get("current_evaluation")
     if current_evaluation:
-        details = current_evaluation.get("metric_details", {})
-        fh = details.get("faithfulness_hallucination", {})
-        lq = details.get("linkedin_quality", {})
+        issues = current_evaluation.get("issues", [])
+        if issues:
+            previous_feedback = "Issues from last attempt: " + "; ".join(issues[:5])
 
-        fabricated = fh.get("fabricated_content", [])
-        if fabricated:
-            previous_issues.append(
-                f"CRITICAL — Remove fabricated claims not found in the source: {'; '.join(fabricated[:3])}"
-            )
-        unsupported = fh.get("unsupported_claims", [])
-        if unsupported:
-            previous_issues.append(
-                f"Unsupported claims — only state facts from the source: {'; '.join(unsupported[:2])}"
-            )
-        fh_reason = fh.get("hallucination_reasoning", "")
-        if fh_reason and not fabricated:
-            previous_issues.append(f"Hallucination issue: {fh_reason[:200]}")
-        faith_reason = fh.get("faithfulness_reasoning", "")
-        if faith_reason and not unsupported:
-            previous_issues.append(f"Faithfulness issue: {faith_reason[:200]}")
-        improvements = lq.get("improvements", [])
-        if improvements:
-            previous_issues.extend(improvements[:3])
-
-        # Always include guardrail failures (banned phrases, formatting, etc.)
-        # These MUST be fixed on retry and are separate from metric feedback
-        guardrail_issues = [
-            issue for issue in current_evaluation.get("issues", [])
-            if any(kw in issue.lower() for kw in ("banned", "guardrail", "markdown", "bullet", "hashtag", "char", "url"))
-        ]
-        for gi in guardrail_issues:
-            if gi not in previous_issues:
-                previous_issues.insert(0, f"MUST FIX: {gi}")
-
-        # Fallback: include all evaluation issues if nothing specific found
-        if not previous_issues:
-            previous_issues = current_evaluation.get("issues", [])
-
-    # Seed for reproducibility but variety across attempts
     url = item.get("url", "")
-    seed = hash(url + str(attempt)) % (2**31)
-
     banned = ConfigManager.banned_phrases()
+    constraints_parts = ["No markdown code blocks, star bullets (* item), or badge syntax ([![)."]
+    if banned:
+        constraints_parts.append(f"Never use these phrases: {', '.join(banned[:10])}.")
+    if recent_hooks:
+        constraints_parts.append(f"Avoid hook patterns already used recently: {', '.join(recent_hooks[:5])}.")
+    constraints = " ".join(constraints_parts)
 
-    result = await llm_generate_post(
-        title=item.get("title", ""),
-        summary=item.get("summary", ""),
-        source=item.get("source", ""),
-        source_url=item.get("url", ""),
-        content=state.get("extracted_content"),
-        trending_topics=[t.get("name", "") for t in state.get("trending_topics", [])],
-        avoid_phrases=banned,
-        previous_issues=previous_issues,
-        lessons_learned=lessons,
-        feedback_patterns=feedback_patterns or None,
-        avoid_hook_patterns=recent_hooks or None,
-        temperature=temp,
-        seed=seed,
-    )
+    research_brief = state.get("research_brief") if not state.get("research_failed") else None
+    brief = research_brief or {}
+    angle = brief.get("angle") or item.get("title", "")
+    evidence_list = brief.get("evidence") or []
+    source_excerpt = (state.get("extracted_content") or item.get("summary", ""))[:2000]
+    style = ((feedback_patterns or "") + ("\n\n" + lessons if lessons else "")).strip()
 
-    post_text = result.get("post_text", "")
-    # If the LLM omitted the source URL from the assembled text, append it.
+    from backend.dspy_modules.post_generator import get_post_generator
+    import dspy as _dspy
+
+    post_text = ""
+    hook_used = ""
+    logger.info("DSPy generating post (attempt=%d, angle=%s)", attempt, angle[:80])
+    try:
+        pred = await _dspy.asyncify(get_post_generator())(
+            angle=angle,
+            evidence=evidence_list,
+            repo_url=url,
+            source_excerpt=source_excerpt,
+            style_context=style,
+            previous_feedback=previous_feedback,
+            constraints=constraints,
+        )
+        post_text = pred.post or ""
+        logger.info("DSPy generation succeeded: %d chars", len(post_text))
+    except Exception as exc:
+        logger.warning("DSPy post generation failed (%s) — using direct LLM fallback", exc)
+        seed = hash(url + str(attempt)) % (2 ** 31)
+        fallback = await llm_generate_post(
+            title=item.get("title", ""),
+            summary=item.get("summary", ""),
+            source=item.get("source", ""),
+            source_url=url,
+            content=state.get("extracted_content"),
+            research_brief=research_brief,
+            trending_topics=[t.get("name", "") for t in state.get("trending_topics", [])],
+            avoid_phrases=banned,
+            previous_issues=[previous_feedback] if previous_feedback else [],
+            lessons_learned=lessons,
+            feedback_patterns=feedback_patterns or None,
+            avoid_hook_patterns=recent_hooks or None,
+            temperature=temp,
+            seed=seed,
+        )
+        post_text = fallback.get("post_text", "")
+        hook_used = fallback.get("hook_pattern_used", "")
+
+    # Ensure source URL is present
     if url and "http" not in post_text:
         post_text = post_text.rstrip() + f"\n\n{url}"
 
+    # Apply LinkedIn Unicode bold formatting (hook line + key metrics)
+    from backend.utils.linkedin_format import apply_linkedin_bold
+    post_text = apply_linkedin_bold(post_text)
+
+    # Normalize hook_pattern_used to a valid pattern name.
+    # The LLM sometimes returns the post's first line instead of the pattern name,
+    # especially after apply_linkedin_bold() has already formatted the text.
+    _valid_hooks = {"discovery", "pattern-interrupt", "curiosity-gap", "bold-statement",
+                    "story-hook", "contrarian", "question-hook"}
+    if hook_used.lower().strip() not in _valid_hooks:
+        hook_used = "unknown"
+
     post_data = {
         "post_text": post_text,
-        "hook": result.get("hook", ""),
-        "body": result.get("body", ""),
-        "takeaway": result.get("takeaway", ""),
-        "hashtags": result.get("hashtags", []),
-        "url": result.get("url", url),
+        "hook": hook_used,
+        "body": "",
+        "takeaway": "",
+        "hashtags": [],
+        "url": url,
         "char_count": len(post_text),
         "issues": [],
         "quality_score": 0,
         "faithfulness_score": 0,
         "passed_quality_gate": False,
-        "hook_pattern_used": result.get("hook_pattern_used", ""),
-        "seo_keywords_used": result.get("seo_keywords_used", []),
+        "hook_pattern_used": hook_used,
+        "seo_keywords_used": [],
     }
 
-    hook_used = post_data.get("hook_pattern_used") or "unknown"
     logs = await _log(
         {**state, "logs": logs},
-        f"Generated post: {post_data['char_count']} chars (temp={temp}, hook={hook_used})"
+        f"Generated post: {post_data['char_count']} chars (attempt={attempt}, hook={hook_used[:60]})"
     )
 
     return {
@@ -653,6 +774,8 @@ def build_pipeline() -> StateGraph:
     graph.add_node("filter_and_score", filter_and_score_node)
     graph.add_node("pick_next_item", pick_next_item_node)
     graph.add_node("extract_article", extract_article_node)
+    graph.add_node("research_content", research_content_node)
+    graph.add_node("evaluate_research", evaluate_research_node)
     graph.add_node("generate_post", generate_post_node)
     graph.add_node("evaluate_post", evaluate_post_node)
     graph.add_node("check_duplicate", check_duplicate_node)
@@ -674,7 +797,15 @@ def build_pipeline() -> StateGraph:
         {"process": "extract_article", "done": "finalize"},
     )
 
-    graph.add_edge("extract_article", "generate_post")
+    graph.add_edge("extract_article", "research_content")
+    graph.add_edge("research_content", "evaluate_research")
+
+    # Research gate: pass → generate, retry → re-research, fallback → generate (degraded)
+    graph.add_conditional_edges(
+        "evaluate_research",
+        research_gate_decision,
+        {"pass": "generate_post", "retry": "research_content", "fallback": "generate_post"},
+    )
     graph.add_edge("generate_post", "evaluate_post")
 
     # Quality gate: accept, retry, or reject
@@ -709,10 +840,15 @@ async def run_pipeline(
     max_retries: int = 3,
     sources: list[str] | None = None,
     broadcast_fn=None,
-    timeout_seconds: int = 1800,
+    timeout_seconds: int | None = None,
 ) -> PipelineState:
     """Run the complete pipeline and return final state."""
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+    # Scale timeout with the number of posts requested.
+    # Budget: 10 min base + 6 min per post (DSPy generation + 4-parallel eval + retries).
+    if timeout_seconds is None:
+        timeout_seconds = 600 + max_posts * 360
 
     # When filtering to 1-2 source types, fetch more per source to ensure enough candidates
     # after dedup/relevance filtering to meet max_posts. With 50% typical pass rate,
@@ -748,6 +884,10 @@ async def run_pipeline(
         "current_item": None,
         "current_item_index": 0,
         "extracted_content": "",
+        "research_brief": None,
+        "research_attempts": 0,
+        "research_evaluation": None,
+        "research_failed": False,
         "current_post": None,
         "generation_attempts": 0,
         "accepted_posts": [],
@@ -765,7 +905,30 @@ async def run_pipeline(
         return result
     except asyncio.TimeoutError:
         logger.error(f"Pipeline timed out after {timeout_seconds}s (run_id={run_id})")
-        log_pipeline_run(run_id=run_id, status="failed")
+        # Salvage: count posts already saved to DB during this run
+        try:
+            from backend.database import fetch_all as _fetch_run_posts
+            saved = _fetch_run_posts(
+                "SELECT quality_score FROM posts WHERE pipeline_run_id = ?", [run_id]
+            )
+            n_saved = len(saved)
+            avg_q = round(sum(r[0] for r in saved) / n_saved, 2) if n_saved else None
+            log_pipeline_run(
+                run_id=run_id,
+                status="completed" if n_saved > 0 else "failed",
+                items_fetched=len(initial_state.get("raw_items", [])),
+                items_filtered=len(initial_state.get("filtered_items", [])),
+                posts_accepted=n_saved,
+                avg_quality=avg_q,
+            )
+            if n_saved:
+                logger.info(
+                    "Timeout salvage: %d posts already saved (avg quality %.2f), "
+                    "marking run as completed", n_saved, avg_q
+                )
+        except Exception as salvage_err:
+            logger.warning("Timeout salvage failed: %s", salvage_err)
+            log_pipeline_run(run_id=run_id, status="failed")
         initial_state["error"] = f"Pipeline timed out after {timeout_seconds}s"
         initial_state["logs"].append(f"[ERROR] Pipeline timed out after {timeout_seconds}s")
         return initial_state

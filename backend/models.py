@@ -6,7 +6,7 @@ Shared data models for API, pipeline, and MCP tools.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -98,6 +98,52 @@ class SourceStat(BaseModel):
 
 # Fix forward reference
 PostStats.model_rebuild()
+
+
+# --- Research Brief (structured output from Research Agent) ---
+
+class ResearchBrief(BaseModel):
+    """Structured output from the Research Agent node.
+
+    Contains extracted facts, evidence, and hook recommendation
+    grounded strictly in the source content — no invention allowed.
+    """
+    content_type: Literal[
+        "github_tool", "github_paper_impl", "research_paper",
+        "article_opinion", "announcement"
+    ] = Field(description="Classified content type, determines which question set was used")
+    angle: str = Field(
+        description="The single most surprising or counterintuitive fact in this source. "
+                    "Must be specific to this content — not generic to any ML tool."
+    )
+    evidence: list[str] = Field(
+        description="Exact verbatim quotes, numbers, or benchmarks from the source. "
+                    "Max 5. Use '[no benchmark data]' sentinel if none exist."
+    )
+    contrast: str = Field(
+        description="The before/without vs after/with gap. What problem existed before? "
+                    "Use '[not stated]' if source does not address this."
+    )
+    limitations: list[str] = Field(
+        description="Caveats, known issues, or constraints the author mentions. "
+                    "Use ['[not mentioned]'] if none stated."
+    )
+    hook_recommendation: Literal[
+        "curiosity-gap", "pattern-interrupt", "bold-statement",
+        "discovery", "story-hook", "contrarian"
+    ] = Field(description="Hook type that best fits the angle of this content")
+    hook_draft: str = Field(
+        description="Suggested opening 1-2 sentences using the recommended hook type. "
+                    "Must be grounded in evidence. No 'What if you could...' openers."
+    )
+    confidence: float = Field(
+        ge=0.0, le=1.0,
+        description="How well the source supports a concrete angle. "
+                    "1.0 = strong benchmarks + clear problem; 0.0 = only marketing language."
+    )
+    data_gaps: list[str] = Field(
+        description="Specific technical details absent from the source that would strengthen the post."
+    )
 
 
 # --- LinkedIn Post (structured LLM output) ---

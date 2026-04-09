@@ -76,7 +76,20 @@
       "Bash(sqlite3 data/linkedin_agent.db \"SELECT id, status, items_fetched, items_filtered, posts_accepted, posts_rejected FROM pipeline_runs ORDER BY started_at DESC LIMIT 5;\")",
       "Bash(sqlite3 data/linkedin_agent.db \"SELECT id, status, items_fetched, items_filtered, posts_accepted, posts_rejected, common_issues FROM pipeline_runs ORDER BY started_at DESC LIMIT 5;\")",
       "Bash(sqlite3 data/linkedin_agent.db \"SELECT id, title, quality_score, length\\(post_text\\) as chars, substr\\(post_text, 1, 200\\) FROM posts WHERE created_at > ''2026-03-31 08:00:00'' ORDER BY created_at;\")",
-      "Bash(sqlite3 data/linkedin_agent.db \"SELECT value FROM config WHERE key = ''generation'';\")"
+      "Bash(sqlite3 data/linkedin_agent.db \"SELECT value FROM config WHERE key = ''generation'';\")",
+      "Bash(PYTHONPATH=. pytest tests/test_research_agent.py -v)",
+      "WebFetch(domain:news.ycombinator.com)",
+      "WebSearch",
+      "Bash(PYTHONPATH=. pytest tests/ --tb=short -q)",
+      "Bash(PYTHONPATH=. pytest tests/ -v)",
+      "Bash(PYTHONPATH=. pytest tests/ -q)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(sqlite3 data/linkedin_agent.db \"SELECT id, status, config FROM pipeline_runs WHERE id = ''run_20260405_182628_051d07''\")",
+      "Bash(sqlite3 data/linkedin_agent.db \":*)",
+      "Bash(__NEW_LINE_32c4f57b1e3575f1__ sqlite3 data/linkedin_agent.db \":*)",
+      "Bash(PYTHONPATH=. python scripts/optimize_dspy.py)",
+      "Bash(sqlite3 data/linkedin_agent.db \"PRAGMA table_info\\(posts\\)\")",
+      "Bash(env)"
     ]
   }
 }

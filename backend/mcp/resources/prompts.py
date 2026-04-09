@@ -49,8 +49,12 @@ ABSOLUTE RULES (violating any of these will cause the post to be rejected):
 5. The post MUST end with hashtags. Nothing — not a single word — appears after the hashtags.
 6. Do NOT use licensing information, contributor badges, or project metadata.
 7. Do NOT start the hook with "What if you could" or "What if you" — this is a lazy question-hook that requires zero insight. Use a real discovery, bold statement, or curiosity-gap instead.
+8. HOOK FIRST LINE: The very first line must be 5–18 words maximum and work as a complete, standalone thought. LinkedIn shows only ~150 characters before "see more" — if the hook doesn't land in those first words, people scroll past. Do NOT continue the sentence onto the next line; start a new paragraph instead.
+   WRONG: "Large language models have a hidden efficiency trick that most engineers overlook — constraining output length actually improves accuracy by 26 points."
+   RIGHT: "Constraining LLM output length improves accuracy by 26 points."
 
 FORMATTING — USE THESE TOOLS ACTIVELY:
+- BLANK LINES between every paragraph — LinkedIn is scanned, not read. Each paragraph is 1–3 lines max. An empty line between paragraphs is required for visual breathing room.
 - → arrows: for feature sequences, transformation steps, or "old way → new way" contrasts
   Example: → Builds the app → runs it → finds the bug → patches it → confirms fix
 - > callout lines: for key specs, standout numbers, or feature highlights (NOT markdown blockquotes)
@@ -64,7 +68,7 @@ FORMATTING — USE THESE TOOLS ACTIVELY:
 - SHORT sentences on their own line: a single powerful sentence alone creates visual impact
   Example: "The hardest part of software was never writing code."
   Example: "It was everything after."
-- Paragraph length: 1-2 sentences is standard. One sentence per line for emphasis.
+- Paragraph length: 1–3 sentences max. One sentence per line for emphasis. NEVER write a paragraph longer than 4 lines.
 
 TONE:
 - Professional but direct — write for a smart colleague who doesn't need hand-holding
@@ -250,10 +254,10 @@ def _build_emoji_guidance(style: str) -> str:
     # Default: "light"
     return """EMOJI USAGE (light — 1-3 only):
 - REQUIRED: Always include at least 1 emoji — AI/tech posts on LinkedIn perform better with visual anchors
-- Place at the start of the hook line and optionally at one key transition
-- Match emoji to the SPECIFIC claim — 🔬 only for actual research, ⚡ only for actual performance, 😳 for genuinely surprising numbers
+- Place at the START of a paragraph line, never mid-sentence
+- Match emoji to the SPECIFIC claim: 🧠 AI/reasoning, ⚡ speed/performance, 🔒 security/safety, 🌍 multilingual/global, 📊 benchmarks/data, 🔬 research, 😳 surprising numbers, 🚀 launches/releases
 - Never use 2+ emojis in a row. Never end a paragraph with an emoji
-- AVOID generic fallback emojis (💡🔥✅) unless they precisely fit the sentence"""
+- AVOID generic fallback emojis (💡🔥✅💪) unless they precisely fit the sentence"""
 
 
 @mcp_server.resource("prompts://relevance-judge")
@@ -357,3 +361,259 @@ def lessons_learned_prompt() -> str:
             lines.append(f"- {issue} (occurred {count}x)")
 
     return "\n".join(lines)
+
+
+# ============================================================
+# RESEARCH AGENT PROMPTS
+# ============================================================
+
+def _classify_content_type(source: str, title: str, url: str, content: str) -> str:
+    """Classify content type programmatically — no LLM, no ambiguity."""
+    content_lower = (content or "")[:3000].lower()
+    title_lower = (title or "").lower()
+    url_lower = (url or "").lower()
+
+    if source == "github":
+        paper_signals = ["arxiv", "we propose", "our method", "our approach",
+                         "we present", "paper:", "preprint", "neural network"]
+        if any(s in content_lower for s in paper_signals):
+            return "github_paper_impl"
+        return "github_tool"
+    elif source in ("arxiv", "papers"):
+        return "research_paper"
+    elif source in ("rss", "hackernews", "reddit", "devto"):
+        if "blog" in url_lower or any(w in title_lower for w in ("announce", "launch", "release", "introducing")):
+            return "announcement"
+        return "article_opinion"
+    elif "blog" in url_lower or any(w in title_lower for w in ("announce", "launch", "release", "introducing")):
+        return "announcement"
+    return "github_tool"  # safe default
+
+
+_RESEARCH_SYSTEM = """You are a technical researcher reading source content before a writer creates a LinkedIn post.
+Your output will be used DIRECTLY by the writer as their factual foundation.
+
+CORE RULES — violating these invalidates the brief:
+1. Extract ONLY facts present in the source. Do NOT invent, infer, or generalize.
+2. If a specific fact is absent from the source, use the exact sentinel: [not stated]
+3. If numeric data is absent, use the exact sentinel: [no benchmark data]
+4. The angle must be specific to THIS source — not a generic statement true of any ML tool.
+5. hook_draft must NOT start with "What if you could", "What if you", or "Introducing".
+6. confidence reflects source evidence strength — be honest, not optimistic."""
+
+
+def research_prompt(
+    content_type: str,
+    title: str,
+    content: str,
+    source_url: str = "",
+    previous_issues: list[str] | None = None,
+) -> tuple[str, str]:
+    """Return (system_prompt, user_prompt) for the Research Agent.
+
+    Typed per content_type so questions are always extractive, never open-ended.
+    Returns a tuple consumed by the LLM call in research_content() tool.
+    """
+    issues_ctx = ""
+    if previous_issues:
+        issues_ctx = (
+            "\n\nPREVIOUS ATTEMPT FAILED — fix these issues:\n"
+            + "\n".join(f"- {i}" for i in previous_issues[:5])
+            + "\nDig deeper into the source content to find specific, concrete facts."
+        )
+
+    content_preview = (content or "")[:8000]
+
+    if content_type == "github_tool":
+        questions = """Answer all 9 fields using ONLY information in the source:
+
+PROBLEM: What specific problem does this solve? One sentence a developer who
+  hit this exact problem would recognize. Not "it improves X" — what is the pain point?
+
+EVIDENCE: List exact numbers, benchmarks, or capability claims quoted verbatim from source.
+  E.g. "15x throughput gain", "supports 600+ models", "zero CPU when idle".
+  If none exist in source: ["[no benchmark data]"]
+
+CONTRAST: Before/without vs after/with gap — what did teams have to do before this?
+  If source does not address this: [not stated]
+
+LIMITATIONS: Caveats, known issues, constraints the author explicitly mentions.
+  If none: ["[not mentioned]"]
+
+ANGLE: The single most surprising or counterintuitive fact specific to THIS tool.
+  Must name a concrete detail — not "it makes things easier" or "it improves performance".
+
+HOOK_RECOMMENDATION: Which hook type fits the angle?
+  curiosity-gap   → a surprising number/result leads; how is explained after
+  pattern-interrupt → opens by stating a widely-held belief is wrong
+  bold-statement  → declarative claim, takes a position, no hedging
+  discovery       → first-person observation of a specific surprising detail
+  story-hook      → scenario that places reader in a concrete situation
+  contrarian      → challenges what most practitioners currently do
+
+HOOK_DRAFT: Write the opening 1-2 sentences using your chosen hook type.
+  Must be grounded in source evidence. No "What if you could..." openers.
+
+CONFIDENCE: Float 0.0–1.0 — how well does this source support a concrete angle?
+  1.0 = strong benchmarks + clear problem + before/after contrast
+  0.5 = partial data, some concrete claims
+  0.0 = only marketing language, no concrete technical details
+
+DATA_GAPS: Technical details absent from the source that would strengthen the post.
+  E.g. ["no installation complexity stated", "no comparison to alternatives"]"""
+
+    elif content_type == "github_paper_impl":
+        questions = """Answer all 9 fields using ONLY information in the source:
+
+PROBLEM: What research problem does this code address? What limitation of prior work motivated it?
+
+EVIDENCE: Exact benchmark numbers, metric improvements, dataset names from source.
+  Quote verbatim. If none: ["[no benchmark data]"]
+
+CONTRAST: What assumption does existing work make that this overturns?
+  If not stated: [not stated]
+
+LIMITATIONS: Author-acknowledged limitations, future work, or known failure cases.
+
+ANGLE: The single claim in this paper/code that contradicts current practice or belief.
+
+HOOK_RECOMMENDATION: curiosity-gap / pattern-interrupt / bold-statement / discovery / story-hook / contrarian
+
+HOOK_DRAFT: Opening 1-2 sentences grounded in the paper's specific claim. No generic openers.
+
+CONFIDENCE: Float 0.0–1.0 based on strength of empirical evidence in source.
+
+DATA_GAPS: What the source omits that would help a practitioner evaluate this work."""
+
+    elif content_type == "research_paper":
+        questions = """Answer all 9 fields using ONLY information in the abstract/content:
+
+PROBLEM: What limitation of prior work does this paper address? Quote the paper's framing.
+
+EVIDENCE: Primary benchmark result — exact metric, dataset, and baseline comparison.
+  E.g. "94% AUC-ROC vs 81% for RAG baseline on WebQSP". If absent: ["[no benchmark data]"]
+
+CONTRAST: What assumption does existing work make that this paper challenges?
+
+LIMITATIONS: Limitations section or acknowledged constraints.
+
+ANGLE: The single claim that would make a practitioner reconsider their current approach.
+
+HOOK_RECOMMENDATION: curiosity-gap / pattern-interrupt / bold-statement / discovery / story-hook / contrarian
+
+HOOK_DRAFT: Opening 1-2 sentences grounded in the paper's specific result.
+
+CONFIDENCE: Float 0.0–1.0 — 1.0 if concrete benchmark with baseline, 0.3 if abstract-only.
+
+DATA_GAPS: What is missing from abstract that a reader would want to know."""
+
+    elif content_type == "article_opinion":
+        questions = """Answer all 9 fields using ONLY information in the article:
+
+PROBLEM: What is the author's central argument? One sentence.
+
+EVIDENCE: What data, studies, examples, or concrete cases does the author cite?
+  If none: ["[no empirical data cited]"]
+
+CONTRAST: What conventional wisdom or common practice does this article challenge?
+
+LIMITATIONS: Does the author acknowledge counterarguments? Include the strongest
+  counterargument even if the author doesn't — write [not stated] if they don't.
+
+ANGLE: The most counterintuitive or actionable insight in this article.
+
+HOOK_RECOMMENDATION: curiosity-gap / pattern-interrupt / bold-statement / discovery / story-hook / contrarian
+
+HOOK_DRAFT: Opening 1-2 sentences that would make an ML engineer pause mid-scroll.
+
+CONFIDENCE: Float 0.0–1.0 — how well-supported is the central claim with evidence?
+
+DATA_GAPS: What evidence or data is absent that would make this argument more convincing."""
+
+    else:  # announcement
+        questions = """Answer all 9 fields using ONLY information in the announcement:
+
+PROBLEM: Strip the marketing. What actual technical capability is being added?
+
+EVIDENCE: Any concrete performance, scale, or cost figures from the announcement.
+  If none: ["[no benchmark data]"]
+
+CONTRAST: What gap does this fill that alternatives don't currently address?
+  If not stated: [not stated]
+
+LIMITATIONS: What is notably absent — what is unproven or unclear?
+
+ANGLE: The one claim that represents a genuine technical advance (not positioning).
+
+HOOK_RECOMMENDATION: curiosity-gap / pattern-interrupt / bold-statement / discovery / story-hook / contrarian
+
+HOOK_DRAFT: Opening 1-2 sentences that state the technical claim objectively.
+
+CONFIDENCE: Float 0.0–1.0 — how much concrete evidence vs marketing claims?
+
+DATA_GAPS: What independent verification or comparison data is missing."""
+
+    user_prompt = f"""Source title: {title}
+Source URL: {source_url}
+Content type: {content_type}
+
+Source content:
+{content_preview}
+
+{questions}{issues_ctx}
+
+Respond with a JSON object matching the ResearchBrief schema exactly."""
+
+    return _RESEARCH_SYSTEM, user_prompt
+
+
+def research_evaluation_prompt(
+    angle: str,
+    evidence: list[str],
+    hook_draft: str,
+    confidence: float,
+    content_type: str,
+) -> str:
+    """LLM judge prompt for evaluating a ResearchBrief quality.
+
+    Called only if programmatic guardrails pass. Single LLM call, returns structured JSON.
+    """
+    evidence_str = "\n".join(f"  - {e}" for e in evidence) if evidence else "  (none)"
+    return f"""You are a research brief quality judge. A technical researcher extracted a brief
+from source content. Evaluate whether it is specific enough to guide a LinkedIn post writer.
+
+BRIEF:
+  Content type: {content_type}
+  Angle: {angle}
+  Evidence:
+{evidence_str}
+  Hook draft: {hook_draft}
+  Confidence: {confidence}
+
+EVALUATE ON 3 DIMENSIONS (score 0-10 each):
+
+1. SPECIFICITY: Is the angle specific to THIS content, or could it describe any ML tool?
+   10 = names a unique, verifiable fact from this source
+   5  = somewhat specific but could apply to similar tools
+   0  = pure marketing language, applies to anything
+
+2. HOOK_VIABILITY: Would this hook make a senior ML engineer pause mid-scroll?
+   10 = genuinely surprising, specific, makes reader want to know more
+   5  = mildly interesting but not compelling
+   0  = generic announcement or question anyone could ask
+
+3. EVIDENCE_GROUNDING: Are claims in hook_draft traceable to the evidence list?
+   10 = every claim in hook_draft has a matching evidence entry
+   5  = mostly grounded but one unverified claim
+   0  = hook_draft contains claims not in evidence
+
+Respond with JSON:
+{{
+  "specificity": <0-10>,
+  "hook_viability": <0-10>,
+  "evidence_grounding": <0-10>,
+  "overall": <average of 3 scores>,
+  "passed": <true if overall >= 6.0>,
+  "issues": [<specific issues if any, empty list if passed>]
+}}
+"""

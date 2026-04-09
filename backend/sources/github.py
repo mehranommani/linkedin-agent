@@ -15,6 +15,7 @@ import httpx
 from backend.models import ContentItem
 from backend.sources.base import BaseSource
 from backend.config import ConfigManager
+from backend.mcp.tools.llm import _load_env_vars as _load_env_file
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,16 @@ _API_HEADERS = {
     "User-Agent": "LinkedInAgent/2.0",
     "Accept": "application/vnd.github+json",
 }
+
+
+def _get_github_token(params: dict) -> str:
+    """Return a GitHub token, checking params → DB config → .env in order."""
+    if t := params.get("github_token"):
+        return t
+    if t := ConfigManager.get("github_token"):
+        return t
+    env = _load_env_file()
+    return env.get("GITHUB_TOKEN", "")
 
 
 class GitHubSource(BaseSource):
@@ -49,14 +60,16 @@ class GitHubSource(BaseSource):
         languages: list[str] = params.get("languages", ["python"])
         since: str = params.get("since", "weekly")
         queries: list[str] = params.get("queries", [])
-        # Viral new repos: 500+ stars in a week is genuinely trending
-        min_stars_new: int = params.get("min_stars_new", params.get("min_stars", 500))
+        # Viral new repos: 1k+ stars in a week = genuinely trending (high signal)
+        min_stars_new: int = params.get("min_stars_new", params.get("min_stars", 1000))
         # Established repos: 5k+ stars with recent activity
         min_stars_established: int = params.get("min_stars_established", 5000)
+        # Topics for established repo search (configurable per-source)
+        established_topics: list[str] | None = params.get("established_topics")
 
-        # Optional GitHub token for higher rate limits
+        # Optional GitHub token for higher rate limits (params → DB config → .env)
         headers = dict(_API_HEADERS)
-        token = params.get("github_token") or ConfigManager.get("github_token")
+        token = _get_github_token(params)
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
@@ -68,7 +81,9 @@ class GitHubSource(BaseSource):
                     items.extend(trending)
 
                 # --- established repos with recent activity (releases, pushes) ---
-                established = await self._search_established(client, languages, min_stars_established, since)
+                established = await self._search_established(
+                    client, languages, min_stars_established, since, established_topics
+                )
                 items.extend(established)
 
                 # --- explicit queries (with star floor) ---
@@ -121,20 +136,23 @@ class GitHubSource(BaseSource):
     # ------------------------------------------------------------------
 
     async def _search_established(
-        self, client: httpx.AsyncClient, languages: list[str], min_stars: int, since: str
+        self, client: httpx.AsyncClient, languages: list[str], min_stars: int, since: str,
+        established_topics: list[str] | None = None,
     ) -> list[ContentItem]:
         """Find established high-star AI/ML repos with recent activity (pushes/releases).
 
-        GitHub Search API does not support OR for topic filters, so we run two
-        targeted queries with different topic anchors and merge results.
+        GitHub Search API does not support OR for topic filters, so we run one
+        targeted query per topic anchor and merge results.
         """
         days = {"daily": 3, "weekly": 14, "monthly": 30}.get(since, 14)
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-        lang_filter = " ".join(f"language:{lang}" for lang in languages[:2])
+        # Use only the primary language — GitHub Search AND-joins multiple language: filters,
+        # which returns nothing for repos that aren't simultaneously written in all of them.
+        primary_lang = languages[0] if languages else "python"
+        lang_filter = f"language:{primary_lang}"
         api_url = "https://api.github.com/search/repositories"
 
-        # Two complementary topic groups — broad enough to cover LLMs, CV, RL, data science
-        topic_groups = ["machine-learning", "llm"]
+        topic_groups = established_topics or ["machine-learning", "llm"]
         items: list[ContentItem] = []
         seen: set[str] = set()
 

@@ -307,6 +307,38 @@ async def _refresh_all_mental_models(bank_id: str) -> None:
         logger.warning("Could not refresh mental models: %s", e)
 
 
+async def _refresh_experience_models() -> None:
+    """Consolidate new memories then refresh experience-driven mental models.
+
+    Consolidation synthesizes raw experience facts into observations that
+    mental models can query. Without consolidation first, refresh returns
+    "I don't have information" even when experience facts exist.
+    """
+    bank_id = _get_bank_id()
+    base_url = _get_base_url()
+
+    # Step 1: trigger consolidation so new experience facts become observations
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.post(
+                f"{base_url}/v1/default/banks/{bank_id}/consolidate",
+                json={},
+                timeout=10.0,
+            )
+        logger.debug("Triggered consolidation for bank: %s", bank_id)
+    except Exception as e:
+        logger.debug("Consolidation trigger failed (non-fatal): %s", e)
+
+    # Step 2: refresh the models that query experience/observation data
+    experience_models = {"Quality Failure Patterns", "Character Count & Density Patterns"}
+    for name in experience_models:
+        try:
+            await _run_sync("refresh_mental_model", bank_id=bank_id, name=name)
+            logger.debug("Refreshed experience mental model: %s", name)
+        except Exception as e:
+            logger.debug("Could not refresh mental model %s: %s", name, e)
+
+
 _STYLE_EXAMPLES = [
     {
         "description": "LMCache — infrastructure/optimization problem-solution template",
@@ -440,6 +472,8 @@ async def store_generation_experience(
             "Stored generation experience: hook=%s source=%s score=%.1f passed=%s",
             hook_pattern, source, overall_score, passed,
         )
+        # Refresh experience-driven mental models immediately so they don't wait for consolidation
+        await _refresh_experience_models()
         return result.success
     except Exception as e:
         logger.error("Failed to store generation experience: %s", e)
@@ -534,6 +568,18 @@ async def store_feedback(
             "Stored feedback in Hindsight: post=%s rating=%d success=%s",
             post_id[:8], rating, result.success,
         )
+        # Consolidate then refresh "User Style Preferences" after each feedback submission
+        try:
+            async with httpx.AsyncClient() as http:
+                await http.post(
+                    f"{_get_base_url()}/v1/default/banks/{_get_bank_id()}/consolidate",
+                    json={},
+                    timeout=10.0,
+                )
+            await _run_sync("refresh_mental_model", bank_id=_get_bank_id(), name="User Style Preferences")
+            logger.debug("Consolidated and refreshed User Style Preferences after feedback")
+        except Exception as e:
+            logger.debug("Could not consolidate/refresh User Style Preferences: %s", e)
         return result.success
     except Exception as e:
         logger.error("Failed to store feedback in Hindsight: %s", e)
@@ -603,6 +649,7 @@ async def store_failed_experience(
             "Stored failed experience: hook=%s source=%s score=%.1f",
             hook_pattern, source, overall_score,
         )
+        await _refresh_experience_models()
         return result.success
     except Exception as e:
         logger.error("Failed to store failed experience in Hindsight: %s", e)

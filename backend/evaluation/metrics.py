@@ -75,17 +75,31 @@ _BIAS_TOXICITY_PROMPT = """You are a professional content tone judge. Evaluate T
 LINKEDIN POST:
 {post_text}
 
+IMPORTANT CONTEXT — what bias means for LinkedIn tech posts:
+LinkedIn posts about open-source tools and research are written by someone excited about discovering interesting work. Enthusiasm, positive framing, and highlighting strengths is NORMAL and expected — it does NOT constitute bias.
+
+Score LOW on bias ONLY for:
+- Paid promotion / undisclosed sponsorship language (e.g. "partner content", "sponsored")
+- Factual misrepresentation (claiming features/results that are false)
+- Complete omission of any limitation or alternative — the post presents a tool as having no drawbacks at all
+- Ideological or political bias unrelated to the technology
+
+Score HIGH on bias (7-10) when:
+- The post includes at least ONE limitation, open question, caveat, or mention of alternatives
+- Claims are grounded in the source (even if enthusiastic)
+- The author presents their own analysis rather than just copying marketing copy
+
 Evaluate:
-1. BIAS: Is the post balanced and objective? Or does it show vendor/promotional/ideological bias?
+1. BIAS: Does the post show actual promotional/ideological bias as defined above? (NOT enthusiasm about an interesting tool)
 2. TOXICITY: Is the tone fully professional? Any condescending, aggressive, or inappropriate language?
 
 Respond in JSON with:
-- bias_score (float 0-10): 10 = perfectly balanced and objective
+- bias_score (float 0-10): 10 = well-balanced analyst voice with at least one limitation or counterpoint
 - toxicity_score (float 0-10): 10 = fully professional and appropriate
 - bias_reasoning (string)
 - toxicity_reasoning (string)
-- bias_indicators (list of strings): specific biased language found
-- toxicity_indicators (list of strings): specific unprofessional language found"""
+- bias_indicators (list of strings): specific biased language found (empty list if none)
+- toxicity_indicators (list of strings): specific unprofessional language found (empty list if none)"""
 
 _LINKEDIN_QUALITY_PROMPT = """You are a LinkedIn content quality expert. Evaluate the overall quality of this post for the LinkedIn platform.
 
@@ -341,6 +355,31 @@ def check_programmatic_guardrails(post_text: str) -> dict[str, Any]:  # noqa: C9
     bullet_lines = [l.strip() for l in lines if l.strip().startswith('* ') or l.strip().startswith('- ')]
     if bullet_lines:
         issues.append("Post uses star (*) or dash (-) bullets — use plain paragraphs instead")
+
+    # Banned hook openers — strip leading emoji/whitespace before checking
+    first_line = post_text.lstrip().split('\n')[0].lstrip()
+    # Strip leading emoji characters (common Unicode emoji ranges)
+    import unicodedata
+    while first_line and unicodedata.category(first_line[0]) in ('So', 'Sm', 'Sk'):
+        first_line = first_line[1:].lstrip()
+    first_lower = first_line.lower()
+    _BANNED_OPENERS = [
+        ("what if you could", "MUST FIX: Hook starts with banned 'What if you could' pattern — use a bold claim, specific number, or discovery instead"),
+        ("what if you ", "MUST FIX: Hook starts with 'What if you' — replace with a concrete statement, not a wish-list question"),
+        ("introducing ", "MUST FIX: Hook starts with 'Introducing' — write a hook that shows value, don't just announce"),
+    ]
+    for opener, msg in _BANNED_OPENERS:
+        if first_lower.startswith(opener):
+            issues.append(msg)
+            break
+
+    # Hook length check — first line must be ≤ 20 words to fit LinkedIn's "see more" cutoff
+    # Strip emoji chars from first line before counting words (already stripped above)
+    first_line_words = len(first_line.split())
+    if first_line_words > 20:
+        issues.append(
+            f"Hook too long ({first_line_words} words) — first line must be ≤20 words to land before LinkedIn's 'see more' cutoff"
+        )
 
     return {
         "passed": len(issues) == 0,

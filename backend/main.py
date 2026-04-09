@@ -29,6 +29,10 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("mcp").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("litellm").setLevel(logging.WARNING)
 
 
 async def _stale_run_cleanup_loop():
@@ -52,6 +56,46 @@ async def _stale_run_cleanup_loop():
             logging.getLogger(__name__).error("Stale-run cleanup failed: %s", e)
 
 
+def _configure_dspy() -> None:
+    """Configure DSPy LM using the first available cloud key (Cerebras → Groq → Ollama)."""
+    try:
+        import dspy
+        from backend.mcp.tools.llm import _load_env_vars
+
+        env = _load_env_vars()
+        log = logging.getLogger(__name__)
+
+        if key := env.get("CEREBRAS_API_KEY"):
+            dspy.configure(lm=dspy.LM(
+                "openai/qwen-3-235b-a22b-instruct-2507",
+                api_key=key,
+                api_base="https://api.cerebras.ai/v1",
+                max_tokens=2000,
+            ))
+            log.info("DSPy LM configured: Cerebras (qwen-3-235b)")
+            return
+
+        if key := (env.get("GROQ_API_KEY") or env.get("GROQ_API_KEY_1")):
+            dspy.configure(lm=dspy.LM(
+                "openai/llama-3.3-70b-versatile",
+                api_key=key,
+                api_base="https://api.groq.com/openai/v1",
+                max_tokens=2000,
+            ))
+            log.info("DSPy LM configured: Groq (llama-3.3-70b)")
+            return
+
+        # Fallback: local Ollama
+        dspy.configure(lm=dspy.LM(
+            "ollama_chat/qwen2.5:14b",
+            api_base="http://localhost:11434",
+            max_tokens=2000,
+        ))
+        log.info("DSPy LM configured: Ollama (qwen2.5:14b)")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("DSPy configuration failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
@@ -59,22 +103,28 @@ async def lifespan(app: FastAPI):
     get_connection()
     register_all_tools()
 
+    # Startup: configure DSPy LM for post generation
+    _configure_dspy()
+
     # Startup: background task to auto-fail stuck pipeline runs
     cleanup_task = asyncio.create_task(_stale_run_cleanup_loop())
 
-    # Startup: initialize Hindsight memory bank (non-blocking)
-    try:
-        from backend.memory.hindsight_client import ensure_bank
-        await ensure_bank()
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "Hindsight memory bank init skipped (server may not be running): %s", e
-        )
+    # Startup: initialize Hindsight memory bank in background (non-blocking)
+    async def _init_hindsight():
+        try:
+            from backend.memory.hindsight_client import ensure_bank
+            await ensure_bank()
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Hindsight memory bank init skipped: %s", e
+            )
+    hindsight_task = asyncio.create_task(_init_hindsight())
 
     yield
 
-    # Shutdown: cancel background cleanup task
+    # Shutdown: cancel background tasks
     cleanup_task.cancel()
+    hindsight_task.cancel()
 
     # Shutdown: close Hindsight client
     try:

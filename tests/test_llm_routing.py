@@ -34,35 +34,32 @@ def _rate_limit_response() -> MagicMock:
 # ── Provider loading ──────────────────────────────────────────────────────────
 
 def test_providers_loaded_from_env(tmp_path, monkeypatch):
-    """Keys in .env are picked up and become separate providers."""
-    env = tmp_path / ".env"
-    env.write_text(
-        "GROQ_API_KEY_1=key_aaa\n"
-        "GROQ_API_KEY_2=key_bbb\n"
-    )
+    """Keys in .env are picked up and become separate providers per prefix."""
     from backend.mcp.tools import llm as llm_mod
-    with patch.object(llm_mod, "_load_groq_keys_from_env", return_value=["key_aaa", "key_bbb"]):
-        providers = llm_mod._get_providers()
-    groq_providers = [p for p in providers if p["name"].startswith("groq")]
-    assert len(groq_providers) == 2
-    assert groq_providers[0]["api_key"] == "key_aaa"
-    assert groq_providers[1]["api_key"] == "key_bbb"
+    fake_env = {"CEREBRAS_API_KEY_1": "key_aaa", "CEREBRAS_API_KEY_2": "key_bbb"}
+    with patch.object(llm_mod, "_load_env_vars", return_value=fake_env):
+        providers = llm_mod._get_generation_providers()
+    cerebras_providers = [p for p in providers if p["name"].startswith("cerebras")]
+    assert len(cerebras_providers) == 2
+    assert cerebras_providers[0]["api_key"] == "key_aaa"
+    assert cerebras_providers[1]["api_key"] == "key_bbb"
 
 
 def test_ollama_always_last_fallback():
     """Ollama is always the last entry in the provider list."""
     from backend.mcp.tools import llm as llm_mod
-    providers = llm_mod._get_providers()
+    providers = llm_mod._get_generation_providers()
     assert providers[-1]["name"] == "ollama"
     assert providers[-1]["api_url"] is None
 
 
 def test_real_env_keys_loaded():
-    """Confirm the 3 real Groq keys are found in the project .env file."""
-    from backend.mcp.tools.llm import _load_groq_keys_from_env
-    keys = _load_groq_keys_from_env()
-    assert len(keys) == 3, f"Expected 3 keys, got {len(keys)}"
-    for key in keys:
+    """Confirm Groq keys from the project .env are loaded into providers."""
+    from backend.mcp.tools.llm import _load_env_vars, _load_keys_for_prefix
+    env_vars = _load_env_vars()
+    groq_keys = _load_keys_for_prefix(env_vars, "GROQ_API_KEY")
+    assert len(groq_keys) >= 1, f"Expected at least 1 Groq key, got {len(groq_keys)}"
+    for key in groq_keys:
         assert key.startswith("gsk_"), f"Key doesn't look like a Groq key: {key[:10]}"
 
 
@@ -74,11 +71,11 @@ async def test_fallback_to_second_key_on_rate_limit():
     from backend.mcp.tools import llm as llm_mod
 
     providers = [
-        {"name": "groq-1", "api_url": "https://api.groq.com/openai/v1", "api_key": "key1",
-         "model": "llama-3.1-8b-instant", "judge_model": "llama-3.3-70b-versatile"},
-        {"name": "groq-2", "api_url": "https://api.groq.com/openai/v1", "api_key": "key2",
-         "model": "llama-3.1-8b-instant", "judge_model": "llama-3.3-70b-versatile"},
-        {"name": "ollama", "api_url": None, "api_key": "", "model": "qwen2.5:7b", "judge_model": "qwen2.5:7b"},
+        {"name": "gemini-1", "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key": "key1", "model": "gemini-2.0-flash"},
+        {"name": "gemini-2", "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key": "key2", "model": "gemini-2.0-flash"},
+        {"name": "ollama", "api_url": None, "api_key": "", "model": "qwen3.5:9b"},
     ]
 
     call_count = 0
@@ -92,15 +89,14 @@ async def test_fallback_to_second_key_on_rate_limit():
     mock_client = AsyncMock()
     mock_client.post = mock_post
 
-    with patch.object(llm_mod, "_get_providers", return_value=providers), \
-         patch.object(llm_mod, "_get_backend", return_value="groq"), \
+    with patch.object(llm_mod, "_get_generation_providers", return_value=providers), \
+         patch.object(llm_mod, "_get_backend", return_value="gemini"), \
          patch.object(llm_mod, "_get_client", return_value=mock_client):
         result = await llm_mod._chat_with_fallback(
             messages=[{"role": "user", "content": "hi"}],
             temperature=0.1,
             json_mode=False,
-            use_judge=False,
-        )
+                    )
 
     assert result == "Hello from key2"
     assert call_count == 2
@@ -112,9 +108,9 @@ async def test_all_cloud_fail_falls_back_to_ollama():
     from backend.mcp.tools import llm as llm_mod
 
     providers = [
-        {"name": "groq-1", "api_url": "https://api.groq.com/openai/v1", "api_key": "k1",
-         "model": "llama-3.1-8b-instant", "judge_model": "llama-3.3-70b-versatile"},
-        {"name": "ollama", "api_url": None, "api_key": "", "model": "qwen2.5:7b", "judge_model": "qwen2.5:7b"},
+        {"name": "gemini-1", "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key": "k1", "model": "gemini-2.0-flash"},
+        {"name": "ollama", "api_url": None, "api_key": "", "model": "qwen3.5:9b"},
     ]
 
     async def mock_post_rate_limit(url, json=None, headers=None, **kwargs):
@@ -128,16 +124,15 @@ async def test_all_cloud_fail_falls_back_to_ollama():
     async def mock_ollama_request(url, payload, retries=2):
         return ollama_response
 
-    with patch.object(llm_mod, "_get_providers", return_value=providers), \
-         patch.object(llm_mod, "_get_backend", return_value="groq"), \
+    with patch.object(llm_mod, "_get_generation_providers", return_value=providers), \
+         patch.object(llm_mod, "_get_backend", return_value="gemini"), \
          patch.object(llm_mod, "_get_client", return_value=mock_client), \
          patch.object(llm_mod, "_ollama_request", side_effect=mock_ollama_request):
         result = await llm_mod._chat_with_fallback(
             messages=[{"role": "user", "content": "hi"}],
             temperature=0.1,
             json_mode=False,
-            use_judge=False,
-        )
+                    )
 
     assert result == "Ollama fallback response"
 
@@ -205,3 +200,48 @@ def test_guardrail_missing_url():
     bad_post = "A" * 950 + "\n#AI #ML #LLM #Agents"
     result = check_programmatic_guardrails(bad_post)
     assert any("url" in i.lower() for i in result["issues"])
+
+
+def test_guardrail_what_if_you_could_banned():
+    from backend.evaluation.metrics import check_programmatic_guardrails
+    bad_post = (
+        "What if you could fine-tune 600 LLMs with one command?\n\n"
+        "MS-SWIFT makes that possible... " + "x" * 900 + " http://example.com\n#AI #ML #LLM #Agents"
+    )
+    result = check_programmatic_guardrails(bad_post)
+    assert not result["passed"]
+    assert any("what if you could" in i.lower() or "banned" in i.lower() for i in result["issues"])
+
+
+def test_guardrail_what_if_you_banned():
+    from backend.evaluation.metrics import check_programmatic_guardrails
+    bad_post = (
+        "What if you leverage a foundation model for tabular data?\n\n"
+        "TabPFN does exactly that... " + "x" * 900 + " http://example.com\n#AI #ML #LLM #Agents"
+    )
+    result = check_programmatic_guardrails(bad_post)
+    assert not result["passed"]
+    assert any("what if you" in i.lower() or "banned" in i.lower() for i in result["issues"])
+
+
+def test_guardrail_emoji_prefix_what_if_banned():
+    from backend.evaluation.metrics import check_programmatic_guardrails
+    bad_post = (
+        "🚀 What if you could automate everything?\n\n"
+        "Some content here... " + "x" * 900 + " http://example.com\n#AI #ML #LLM #Agents"
+    )
+    result = check_programmatic_guardrails(bad_post)
+    assert not result["passed"]
+    assert any("what if you" in i.lower() or "banned" in i.lower() for i in result["issues"])
+
+
+def test_guardrail_bold_statement_hook_passes():
+    from backend.evaluation.metrics import check_programmatic_guardrails
+    good_post = (
+        "LMCache eliminates KV cache recomputation across requests — 15x throughput, zero extra memory.\n\n"
+        "Most inference frameworks throw away the KV cache when a request ends. "
+        "LMCache offloads it to shared CPU/disk storage between requests. " + "x" * 700
+        + " http://example.com\n#AI #ML #LLM #Agents"
+    )
+    result = check_programmatic_guardrails(good_post)
+    assert result["passed"], f"Good hook should pass: {result['issues']}"
