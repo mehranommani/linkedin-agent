@@ -1,0 +1,4 @@
+-- LinkedIn AI Agent v3 — Schema Migration v2 (SQLite)
+-- =====================================================
+-- This file is now a no-op: all tables from v1 + v2 are in schema.sql.
+-- Kept for compatibility with migrate.py.

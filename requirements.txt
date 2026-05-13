@@ -1,33 +1,41 @@
-# LinkedIn AI News Agent - Dependencies
-# =====================================
+# LinkedIn AI Content Agent - Root Dependencies
+# ==============================================
+# For quick local dev: pip install -r requirements.txt
+# For Docker: see backend/requirements.txt
 
-# === LOCAL LLM (Recommended for agent_local.py) ===
-# No Python package needed - Ollama runs as a service
-# Install: brew install ollama
-# Pull model: ollama pull qwen2.5:14b
+# Backend (FastAPI + MCP + LangGraph)
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 
-# === Cloud API (for agent_enhanced.py) ===
-google-generativeai>=0.8.0
+# Database (SQLite is stdlib — no install needed)
+# duckdb is only needed to run the one-time migration script
 
-# Web Scraping & RSS
+# MCP
+mcp>=1.0.0
+
+# LangGraph Pipeline
+langgraph>=0.2.0
+langchain-core>=0.2.0
+
+# HTTP
+httpx>=0.27.0
+requests>=2.31.0
+
+# Content Fetching
 feedparser>=6.0.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
-requests>=2.31.0
 html2text>=2024.2.26
 
 # Data Processing
 pandas>=2.0.0
 
-# LangChain (for agent_verified.py)
-langchain>=0.2.0
-langchain-ollama>=0.1.0
-langchain-core>=0.2.0
-pydantic>=2.0.0
+# DSPy — prompt optimization + runtime Refine retries
+dspy-ai>=2.6
 
-# Dashboard UI (for dashboard.py)
-streamlit>=1.30.0
-
-# Optional: Advanced Features
-# numpy>=1.24.0  # For semantic similarity
-# scikit-learn>=1.3.0  # For text clustering
+# Optional: Evaluation (not required for core pipeline)
+# ragas>=0.1.0
+# langsmith>=0.1.0
+# datasets>=2.14.0
